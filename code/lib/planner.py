@@ -103,9 +103,6 @@ def select_plan(
     # ------------------------------------------------------------------
     # 2. installments
     # ------------------------------------------------------------------
-    if max_installment_months := max_install_months:
-        max_install_days = max_installment_months * 31
-
     install_options = [o for o in payment_options if o.get('payment_method') == 'installments']
     if 'installments' in payment_methods_ok:
         for opt in install_options:
@@ -232,9 +229,20 @@ def _try_with_spending_changes(
     willing_reduce = profile.get('expense_categories_user_is_willing_to_reduce', set())
     protected = profile.get('expense_categories_to_protect', set())
 
+    # How far short is the base plan? Only changes whose 90-day saving is
+    # at least 50% of the gap are worth considering — this prevents trivially
+    # small subscriptions from appearing as spending_changes when the user's
+    # budget is tight but the saving makes no real difference.
+    base_debits  = user_state.all_future_debits()
+    base_credits = user_state.all_future_credits()
+    from .forecast import build_balance_timeline, amount_safe_to_pay_today
+    base_tl   = build_balance_timeline(rd, user_state.balance, base_debits, base_credits, forecast_days)
+    base_astp = amount_safe_to_pay_today(base_tl, rd, forecast_days, min_bal, requested)
+    gap = max(0.0, requested - base_astp)   # how much more we need to unlock
+
     # Build list of candidate spending changes
-    possible_stops = []   # (event_id, category, monthly_amount)
-    possible_reduces = []  # (event_id, category, current_amount, min_amount)
+    possible_stops   = []   # (event_id, category, monthly_amount)
+    possible_reduces = []   # (event_id, category, current_amount, min_amount)
 
     seen_cats = set()
     for item in user_state.recurring_debits:
@@ -243,21 +251,28 @@ def _try_with_spending_changes(
             continue
         if cat in seen_cats:
             continue
-        # Derive the real event_id by stripping projection suffixes
+        # Strip projection suffixes to get the real dataset event_id
         real_eid = eid
         for suffix in ('_curmon', '_proj', '_r1', '_r2', '_r3', '_r4'):
             if real_eid.endswith(suffix):
                 real_eid = real_eid[: -len(suffix)]
                 break
-        # Skip synthesised / injected events that have no real event_id
+        # Skip synthesised / injected events with no real event_id
         if real_eid.startswith('_') or not real_eid:
             continue
         seen_cats.add(cat)
+
         if flex in config.FLEXIBLE_STOPPABLE and cat in willing_stop:
-            possible_stops.append((real_eid, cat, amt))
+            # Monthly saving = amt × 3 months over the 90-day window
+            saving_90d = amt * 3
+            # Only include if the saving materially closes the gap (≥50%)
+            if gap <= 0 or saving_90d >= gap * 0.5:
+                possible_stops.append((real_eid, cat, amt))
         elif flex in config.FLEXIBLE_REDUCIBLE and cat in willing_reduce:
             if min_amt is not None and min_amt < amt:
-                possible_reduces.append((real_eid, cat, amt, min_amt))
+                saving_90d = (amt - min_amt) * 3
+                if gap <= 0 or saving_90d >= gap * 0.5:
+                    possible_reduces.append((real_eid, cat, amt, min_amt))
 
     # Limit to MAX_SPENDING_CHANGES combinations
     max_changes = config.MAX_SPENDING_CHANGES

@@ -436,7 +436,7 @@ class UserFinancialState:
         Settled events are already in current_available_balance — we only
         project future months, never the current partial month.
         """
-        from collections import defaultdict as _dd
+        _dd = defaultdict  # local alias
 
         for cat, entries in settled_debits_by_cat.items():
             if not entries:

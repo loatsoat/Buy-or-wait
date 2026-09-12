@@ -3,7 +3,7 @@
 ## Run Summary
 
 - Total requests processed: 250
-- Total wall-clock time: 0.8s
+- Total wall-clock time: 0.7s
 - Average time per request: 0.00s
 
 ## Model Usage
