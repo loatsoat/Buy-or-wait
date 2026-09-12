@@ -1,0 +1,73 @@
+## 2026-09-12T00:00:00Z SESSION START
+
+tool=Kiro
+Repo Root: C:\Users\bchau\Downloads\code\repo
+Branch: main
+Worktree: main
+Parent Agent: none
+Language: py
+Time Remaining: 0d 18h 0m
+
+## 2026-09-12T00:01:00Z Merged existing code into repo and implemented full pipeline
+
+User Prompt (verbatim, secrets redacted):
+Buy or Wait? Build an AI-powered financial agent... merge it into this also
+
+Agent Response Summary:
+Cloned the GitHub repo, merged the existing partial code (lib/config.py, currency.py, data_loader.py, ocr.py) into repo/code/. Implemented all missing modules: messages_nlp.py, events.py, forecast.py, planner.py, explain.py, main.py, evaluation/main.py. Pipeline runs end-to-end producing output.csv for all 250 requests in ~4 seconds.
+
+Actions:
+* Created code/lib/messages_nlp.py
+* Created code/lib/events.py
+* Created code/lib/forecast.py
+* Created code/lib/planner.py
+* Created code/lib/explain.py
+* Created code/main.py
+* Created code/evaluation/main.py
+* Ran py code/main.py — 250 rows written
+
+Context:
+tool=Kiro
+branch=main
+repo_root=C:\Users\bchau\Downloads\code\repo
+worktree=main
+parent_agent=none
+
+## 2026-09-12T00:30:00Z Fixed salary projection bug and aggregated monthly expense detection
+
+User Prompt (verbatim, secrets redacted):
+fix this first (events.py bugs)
+
+Agent Response Summary:
+Identified three root causes in events.py: (1) salary projection skipped when last entry has None amount, (2) aggregated monthly expense categories double-counted current month, (3) discretionary categories projected even with single month of data. Fixed all three. Result: affordability_status 68%->76%, recommended_payment_method 72%->84%, payment_plan 56%->78%, efpd 48%->76%.
+
+Actions:
+* Edited code/lib/events.py — _project_salary, _detect_recurring
+* Ran py code/main.py && py code/evaluation/main.py
+
+Context:
+tool=Kiro
+branch=main
+repo_root=C:\Users\bchau\Downloads\code\repo
+worktree=main
+parent_agent=none
+
+## 2026-09-12T01:00:00Z Switched to per-transaction replay for expense projection
+
+User Prompt (verbatim, secrets redacted):
+yes (continue fixing amount_safe_to_pay)
+
+Agent Response Summary:
+Replaced monthly-lump projection with per-transaction calendar-month replay: take the most recent complete calendar month of transactions per category, replay them shifted +30/+60/+90 days scaled to the median monthly total. Fixed salary gap detection to strip mid-cycle bonuses while preserving regular paydays. Fixed salary_date message amendment to inject a projected credit when no scheduled event exists.
+
+Actions:
+* Edited code/lib/events.py — _detect_recurring (per-transaction replay), _project_salary (mid-cycle strip, date override)
+* Edited code/lib/planner.py — spending_changes only tried when no safe plan found without them
+* Ran py code/main.py && py code/evaluation/main.py
+
+Context:
+tool=Kiro
+branch=main
+repo_root=C:\Users\bchau\Downloads\code\repo
+worktree=main
+parent_agent=none
