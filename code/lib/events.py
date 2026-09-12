@@ -378,6 +378,13 @@ class UserFinancialState:
                     raw_amt = e.get('amount_home')
                     if raw_amt is not None and raw_amt > 0:
                         salary_settled.append((sdate, raw_amt))
+                # Also track non-salary recurring credits (freelance, reimbursement,
+                # investment_sale proceeds already settled) for income gap detection
+                elif direction == config.CREDIT and etype not in config.NON_RECURRING_EVENT_TYPES:
+                    if not e.get('_ignored') and not e.get('_is_reimbursement'):
+                        raw_amt = e.get('amount_home')
+                        if raw_amt is not None and raw_amt > 0:
+                            salary_settled.append((sdate, raw_amt))
 
             elif status in config.CONFIRMED_FUTURE_STATUSES:
                 if e.get('_ignored'):
@@ -416,24 +423,19 @@ class UserFinancialState:
     })
 
     def _detect_recurring(self, settled_debits_by_cat, start, end):
-        """For each expense category, detect if it's monthly recurring and project forward.
+        """Detect recurring expense categories and project them forward.
 
-        Two projection modes:
-        1. STRICT MONTHLY  – one entry per ~month (gaps 25–37 days).
-           Project one occurrence per month on the same day-of-month, starting
-           from the next expected date after the last settled occurrence.
-        2. AGGREGATED MONTHLY – multiple entries in the same calendar month
-           (groceries, transport, etc.).  Sum per calendar month, take the
-           median of complete months only (exclude the *current* partial month
-           because that spend is already in current_available_balance), then
-           project one lump per future month.
+        AGGREGATED MONTHLY (avg >1.8 entries/month):
+          Uses a 3-month rolling median to remove single-month variance.
+          Replays the most recent complete month's transaction timing,
+          scaled to the 3-month median total, shifted +30/+60/+90 days.
 
-        KEY INVARIANT: settled events are already reflected in
-        current_available_balance.  We never project onto dates that fall
-        inside the *same calendar month* as the last settled entry for that
-        category, because those costs are already baked in.
+        STRICT MONTHLY (one entry per ~month):
+          Projects the median amount on the same day-of-month going forward.
+
+        Settled events are already in current_available_balance — we only
+        project future months, never the current partial month.
         """
-        import calendar as _cal
         from collections import defaultdict as _dd
 
         for cat, entries in settled_debits_by_cat.items():
@@ -450,7 +452,7 @@ class UserFinancialState:
                 if d and d >= cutoff
             ]
             if not recent:
-                recent = entries_sorted[-4:]   # fallback: last 4 entries
+                recent = entries_sorted[-4:]
             if not recent:
                 continue
 
@@ -458,92 +460,93 @@ class UserFinancialState:
             last_flex = recent[-1][3] or 'fixed'
             last_min  = recent[-1][4]
             last_eid  = recent[-1][2]
+            rent_amt  = getattr(self, '_rent_base_amount', None)
 
-            # Rent-increase override
-            rent_amt = getattr(self, '_rent_base_amount', None)
-
-            # ── Count entries per calendar month ──────────────────────────
+            # Count entries per calendar month
             months_seen = _dd(list)
             for d, amt, eid, flex, min_amt in recent:
                 if d:
                     months_seen[(d.year, d.month)].append(amt)
 
-            n_months        = len(months_seen)
-            total_entries   = len(recent)
-            avg_per_month   = total_entries / max(n_months, 1)
+            n_months      = len(months_seen)
+            total_entries = len(recent)
+            avg_per_month = total_entries / max(n_months, 1)
 
-            # ── Decide projection mode ────────────────────────────────────
             if avg_per_month >= 1.8:
-                # ── AGGREGATED MONTHLY (per-transaction replay) ──────────
-                # Project each transaction from the last complete 30-day window
-                # forward by 30, 60, 90 days. This preserves intra-month
-                # timing and avoids the lump-sum timing problem.
+                # ── AGGREGATED MONTHLY ──────────────────────────────────
+                # Require ≥2 months of history for discretionary categories
                 if cat in self._DISCRETIONARY_CATS and n_months < 2:
                     continue
 
                 current_ym = (start.year, start.month)
 
-                # Use only complete prior months for the template month
+                # Complete prior months only (exclude current partial month)
                 complete_months = {
                     ym: vals
                     for ym, vals in months_seen.items()
                     if ym != current_ym
                 }
                 if not complete_months:
-                    complete_months = months_seen
+                    complete_months = dict(months_seen)
 
-                monthly_totals = sorted(sum(v) for v in complete_months.values())
-                median_monthly = monthly_totals[len(monthly_totals) // 2]
+                # ── 3-month rolling median ──────────────────────────────
+                sorted_yms   = sorted(complete_months.keys())
+                last3_yms    = sorted_yms[-3:]
+                last3_totals = sorted(sum(complete_months[ym]) for ym in last3_yms)
+                median_monthly = last3_totals[len(last3_totals) // 2]
+
+                # If fewer than 2 months available, blend with daily-burn average
+                # to avoid severe under-projection on sparse histories
+                if len(last3_yms) < 2:
+                    all_totals    = [sum(v) for v in complete_months.values()]
+                    avg_monthly   = sum(all_totals) / len(all_totals) if all_totals else median_monthly
+                    median_monthly = 0.7 * median_monthly + 0.3 * avg_monthly
 
                 if cat == 'rent' and rent_amt is not None:
                     median_monthly = rent_amt
 
                 existing_dates = {d for d, _, _, c, _, _ in self.future_debits if c == cat}
 
-                # Find the most recent complete calendar month's transactions
-                # (not a rolling 30-day window, which can miss early-month items)
-                import calendar as _cal3
-                template_ym = (last_date.year, last_date.month)
-                # If last_date is in the current month, use the prior month
-                if template_ym == (start.year, start.month):
-                    if template_ym[1] == 1:
-                        template_ym = (template_ym[0] - 1, 12)
-                    else:
-                        template_ym = (template_ym[0], template_ym[1] - 1)
-                # Get all entries in that calendar month
-                template = [
-                    (d, amt) for d, amt, eid, flex, min_amt in entries_sorted
-                    if d and d.year == template_ym[0] and d.month == template_ym[1]
-                ]
+                # ── Template: most recent complete calendar month ────────
+                template_ym = None
+                for ym in reversed(sorted_yms):
+                    if complete_months.get(ym):
+                        template_ym = ym
+                        break
+
+                template = []
+                if template_ym:
+                    template = [
+                        (d, amt) for d, amt, eid, flex, min_amt in entries_sorted
+                        if d and d.year == template_ym[0] and d.month == template_ym[1]
+                    ]
+
                 if not template:
-                    # fallback: last 30-day window
+                    # Fallback: last 30-day window
                     window_start = last_date - timedelta(days=29)
                     template = [
                         (d, amt) for d, amt, eid, flex, min_amt in entries_sorted
                         if d and window_start <= d <= last_date
                     ]
+
                 if not template:
-                    # fallback: single lump per month
+                    # Last resort: single lump per month
                     dom = _day_of_month(last_date)
-                    last_ym = (last_date.year, last_date.month)
-                    if last_ym[1] == 12:
-                        first_proj_month = date(last_ym[0] + 1, 1, 1)
-                    else:
-                        first_proj_month = date(last_ym[0], last_ym[1] + 1, 1)
-                    proj_start = max(start, first_proj_month)
-                    projected_dates = _dates_for_day_of_month(dom, proj_start, end)
-                    for pd in projected_dates:
+                    lym = (last_date.year, last_date.month)
+                    fpm = date(lym[0] + 1, 1, 1) if lym[1] == 12 else date(lym[0], lym[1] + 1, 1)
+                    proj_start = max(start, fpm)
+                    for pd in _dates_for_day_of_month(dom, proj_start, end):
                         if pd not in existing_dates:
                             self.recurring_debits.append((
                                 pd, median_monthly, last_eid + '_proj', cat, last_flex, last_min
                             ))
                     continue
 
-                # Scale template to match median_monthly
+                # Scale template transactions to the 3-month median total
                 template_total = sum(a for _, a in template)
                 scale = median_monthly / template_total if template_total > 0 else 1.0
 
-                # Replay for 3 cycles (30, 60, 90 days ahead)
+                # Replay +30, +60, +90 days
                 for cycle in range(1, 4):
                     shift = timedelta(days=30 * cycle)
                     for orig_d, amt in template:
@@ -555,7 +558,7 @@ class UserFinancialState:
                             ))
 
             else:
-                # ── STRICT MONTHLY ───────────────────────────────────────
+                # ── STRICT MONTHLY ──────────────────────────────────────
                 is_monthly = False
                 if len(recent) >= 2:
                     gaps = []
@@ -565,25 +568,23 @@ class UserFinancialState:
                             gaps.append((d2 - d1).days)
                     is_monthly = bool(gaps) and all(25 <= g <= 37 for g in gaps)
                 else:
-                    # Single entry — only project if it's a known fixed commitment
                     is_monthly = cat in self._FIXED_MONTHLY_CATS
 
                 if not is_monthly:
                     continue
 
-                amounts = sorted(amt for _, amt, _, _, _ in recent)
+                amounts    = sorted(amt for _, amt, _, _, _ in recent)
                 median_amt = amounts[len(amounts) // 2]
 
                 if cat == 'rent' and rent_amt is not None:
                     median_amt = rent_amt
 
-                dom = _day_of_month(last_date)
+                dom           = _day_of_month(last_date)
                 next_expected = last_date + timedelta(days=28)
                 proj_start    = max(start, next_expected)
-                projected_dates = _dates_for_day_of_month(dom, proj_start, end)
 
                 existing_dates = {d for d, _, _, c, _, _ in self.future_debits if c == cat}
-                for pd in projected_dates:
+                for pd in _dates_for_day_of_month(dom, proj_start, end):
                     if pd not in existing_dates:
                         self.recurring_debits.append((
                             pd, median_amt, last_eid + '_proj', cat, last_flex, last_min

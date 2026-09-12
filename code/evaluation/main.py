@@ -101,16 +101,25 @@ def compare_row(pred, truth, requests_map):
 
     results = {}
 
-    # amount_safe_to_pay
+    # amount_safe_to_pay — multi-threshold
     p_astp = _parse_float(pred.get('amount_safe_to_pay'))
     t_astp = _parse_float(truth.get('amount_safe_to_pay'))
     if t_astp is not None and p_astp is not None:
-        ok = _close(p_astp, t_astp)
+        diff_pct = abs(p_astp - t_astp) / max(abs(t_astp), 1.0) * 100
+        ok_1pct  = diff_pct <= 1.0
+        ok_5pct  = diff_pct <= 5.0
+        ok_10pct = diff_pct <= 10.0
         # Also check bounds
         if requested is not None:
-            ok = ok and 0 <= p_astp <= requested + 0.01
-        results['amount_safe_to_pay'] = ('pass' if ok else 'fail',
-                                          f'pred={p_astp}, truth={t_astp}')
+            bounds_ok = 0 <= p_astp <= requested + 0.01
+        else:
+            bounds_ok = True
+        ok = ok_1pct and bounds_ok
+        results['amount_safe_to_pay'] = (
+            'pass' if ok else 'fail',
+            f'pred={p_astp:.2f}, truth={t_astp:.2f}, diff={diff_pct:.1f}% '
+            f'[≤1%:{ok_1pct} ≤5%:{ok_5pct} ≤10%:{ok_10pct}]'
+        )
     else:
         results['amount_safe_to_pay'] = ('skip', 'no truth value')
 
@@ -349,12 +358,32 @@ def main():
 
     print()
     print('Field accuracy (labeled rows):')
+    astp_within = {'1%': 0, '5%': 0, '10%': 0}
     for field in FIELD_NAMES:
         p = field_stats[field]['pass']
         f = field_stats[field]['fail']
         total = p + f
         pct = f'{p / total * 100:.0f}%' if total > 0 else 'n/a'
         print(f'  {field:<35} {p:2d}/{total:2d}  {pct}')
+        # Extra detail for amount_safe_to_pay
+        if field == 'amount_safe_to_pay':
+            for rid, truth in sorted(samples.items()):
+                pred = predictions.get(rid)
+                if not pred:
+                    continue
+                p_v = _parse_float(pred.get('amount_safe_to_pay'))
+                t_v = _parse_float(truth.get('amount_safe_to_pay'))
+                if p_v is not None and t_v is not None and t_v >= 0:
+                    diff = abs(p_v - t_v) / max(abs(t_v), 1.0) * 100
+                    if diff <= 1.0:
+                        astp_within['1%'] += 1
+                    if diff <= 5.0:
+                        astp_within['5%'] += 1
+                    if diff <= 10.0:
+                        astp_within['10%'] += 1
+            n = len([r for r in samples if predictions.get(r)])
+            print(f'    amount_safe_to_pay within ±1%:{astp_within["1%"]}/{n}  '
+                  f'±5%:{astp_within["5%"]}/{n}  ±10%:{astp_within["10%"]}/{n}')
 
     print()
     print('=' * 70)
