@@ -1,17 +1,6 @@
-"""Resolve per-user financial state.
+"""Resolve per-user financial state and build categorised future cash flows."""
 
-Steps:
-1. Currency-normalise every event into the user's home currency.
-2. Fill blank amounts via ocr.py (linked images).
-3. Apply message amendments (salary changes, rent increases, etc.).
-4. Split events into:
-   - settled_history : status=settled  (already in current_available_balance)
-   - future_debits   : confirmed upcoming debits (pending/scheduled debit)
-   - future_credits  : confirmed upcoming credits (scheduled salary, confirmed invoices)
-   - recurring_debits: inferred monthly recurring debit forecasts
-5. Detect recurring income and expense patterns.
-"""
-
+import calendar
 import os
 from collections import defaultdict
 from datetime import date, timedelta
@@ -24,13 +13,10 @@ try:
     _OCR_AVAILABLE = True
 except Exception:
     _OCR_AVAILABLE = False
+
     def extract_amount(_path):
         return None
 
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 def _to_str(d):
     if d is None:
@@ -43,9 +29,8 @@ def _day_of_month(d):
 
 
 def _dates_for_day_of_month(dom, start, end):
-    """All dates with day-of-month==dom in [start, end]."""
+    """Return all dates with day-of-month == dom in [start, end]."""
     results = []
-    import calendar
     cur = start.replace(day=1)
     while cur <= end:
         last = calendar.monthrange(cur.year, cur.month)[1]
@@ -53,17 +38,12 @@ def _dates_for_day_of_month(dom, start, end):
         candidate = cur.replace(day=candidate_day)
         if start <= candidate <= end:
             results.append(candidate)
-        # advance to next month
         if cur.month == 12:
             cur = cur.replace(year=cur.year + 1, month=1)
         else:
             cur = cur.replace(month=cur.month + 1)
     return results
 
-
-# ---------------------------------------------------------------------------
-# Main resolver
-# ---------------------------------------------------------------------------
 
 class UserFinancialState:
     """All financial data for one user, normalised and ready for forecasting."""
@@ -82,26 +62,18 @@ class UserFinancialState:
         self._images_by_event = images_by_event
         self._images_dir = images_dir
 
-        # Normalised events list (amounts in home currency)
         raw_events = events or []
         self._all_events = self._normalise_events(raw_events)
 
-        # Apply message amendments
         msgs = messages_by_user or []
         self._apply_messages(msgs)
 
-        # Build categorised future flows
         self._build_future_flows()
-
-    # ------------------------------------------------------------------
-    # Step 1: normalise amounts to home currency
-    # ------------------------------------------------------------------
 
     def _normalise_events(self, events):
         normalised = []
         for e in events:
             e2 = dict(e)
-            # Fill blank amount from OCR if possible
             if e2.get('amount') is None:
                 img_info = self._images_by_event.get(e2.get('event_id', ''))
                 if img_info:
@@ -109,7 +81,6 @@ class UserFinancialState:
                     img_path = os.path.join(self._images_dir, f'{img_id}.png')
                     val = extract_amount(img_path) if _OCR_AVAILABLE else None
                     e2['amount'] = val
-            # Convert currency
             amount = e2.get('amount')
             cur = e2.get('currency', self.home_currency)
             settle_date = e2.get('settlement_date') or e2.get('event_date')
@@ -124,13 +95,8 @@ class UserFinancialState:
             normalised.append(e2)
         return normalised
 
-    # ------------------------------------------------------------------
-    # Step 2: apply message amendments
-    # ------------------------------------------------------------------
-
     def _apply_messages(self, msgs):
         """Mutate self._all_events based on parsed message amendments."""
-        # Sort by sent_at so later messages override earlier ones
         msgs_sorted = sorted(msgs, key=lambda m: m.get('sent_at', '') or '')
 
         for msg in msgs_sorted:
@@ -144,7 +110,6 @@ class UserFinancialState:
                         for e in self._all_events:
                             if e['event_id'] == eid:
                                 e['_ignored'] = True
-                    # Also mark any pending credit from this message's related event
 
                 elif atype == 'settled_credit':
                     eid = amd.get('event_id')
@@ -160,7 +125,6 @@ class UserFinancialState:
                         for e in self._all_events:
                             if e['event_id'] == eid:
                                 e['_ignored'] = True
-                    # also ignore paired leg
                     linked = msg.get('related_event_id')
                     if linked and linked != eid:
                         for e in self._all_events:
@@ -180,7 +144,6 @@ class UserFinancialState:
                     if eid:
                         for e in self._all_events:
                             if e['event_id'] == eid:
-                                # Keep the debit but mark it – reversal not yet posted
                                 e['_card_dispute'] = True
 
                 elif atype == 'failed_debit':
@@ -188,14 +151,12 @@ class UserFinancialState:
                     if eid:
                         for e in self._all_events:
                             if e['event_id'] == eid:
-                                # Bill still outstanding – treat as pending debit
                                 e['status'] = 'pending'
 
                 elif atype == 'salary_ended':
                     remaining = amd.get('remaining_amount')
                     self._salary_ended = True
-                    self._salary_remaining = remaining  # may be None
-                    # Mark future salary events as cancelled if no remaining
+                    self._salary_remaining = remaining
                     if remaining is None:
                         for e in self._all_events:
                             if (e.get('direction') == config.CREDIT
@@ -208,14 +169,13 @@ class UserFinancialState:
                     amount = amd.get('amount')
                     if amount is not None:
                         self._salary_temp_amount = amount
-                        # Override the next future salary
                         for e in self._all_events:
                             if (e.get('direction') == config.CREDIT
                                     and e.get('event_type') in ('income', 'salary')
                                     and e.get('status') in ('scheduled', 'pending')
                                     and (e.get('settlement_date') or date.min) > self.request_date):
                                 e['amount_home'] = amount
-                                break  # only first upcoming
+                                break
 
                 elif atype == 'salary_resume':
                     amount = amd.get('amount')
@@ -227,7 +187,6 @@ class UserFinancialState:
                 elif atype == 'salary_date':
                     new_date = amd.get('new_date')
                     if new_date:
-                        # Try to reschedule the next upcoming salary event
                         updated = False
                         for e in self._all_events:
                             if (e.get('direction') == config.CREDIT
@@ -239,8 +198,6 @@ class UserFinancialState:
                                 updated = True
                                 break
                         if not updated:
-                            # No existing scheduled event — store as override so
-                            # _project_salary will use this as the first projected date
                             self._salary_next_date_override = new_date
 
                 elif atype == 'salary_first':
@@ -249,7 +206,6 @@ class UserFinancialState:
                     if amount is not None:
                         self._first_salary_amount = amount
                         self._first_salary_date = eff_date
-                        # Update or inject a scheduled salary event
                         updated = False
                         for e in self._all_events:
                             if (e.get('direction') == config.CREDIT
@@ -285,7 +241,6 @@ class UserFinancialState:
                     if amount is not None:
                         self._salary_change_amount = amount
                         self._salary_change_date = eff_date
-                        # Update future salary events on/after effective_date
                         for e in self._all_events:
                             if (e.get('direction') == config.CREDIT
                                     and e.get('event_type') in ('income', 'salary')
@@ -297,7 +252,6 @@ class UserFinancialState:
 
                 elif atype == 'rent_increase':
                     pct = amd.get('percent', 12.0)
-                    # Find the most recent settled rent event and increase its amount
                     best = None
                     for e in self._all_events:
                         if (e.get('category') == 'rent'
@@ -313,13 +267,11 @@ class UserFinancialState:
                 elif atype == 'childcare_start':
                     eff_date = amd.get('effective_date')
                     self._childcare_start_date = eff_date
-                    # We'll handle this in _build_future_flows
 
                 elif atype == 'invoice_confirmed':
                     amount = amd.get('amount')
                     settle_date = amd.get('settlement_date')
                     if amount is not None and settle_date is not None:
-                        # Only the first confirmed invoice counts; others still awaiting
                         self._all_events.append({
                             'event_id': '_msg_invoice',
                             'user_id': self.user_id,
@@ -335,25 +287,17 @@ class UserFinancialState:
                             '_msg_injected': True,
                         })
 
-    # ------------------------------------------------------------------
-    # Step 3: build future flows
-    # ------------------------------------------------------------------
-
     def _build_future_flows(self):
         """Populate self.future_debits, self.future_credits, self.recurring_debits."""
         rd = self.request_date
-        # Project 5 extra days beyond the 90-day window so salary credits that
-        # land just after day 90 (e.g. day 92-95) are captured by efpd logic.
         horizon = rd + timedelta(days=config.FORECAST_DAYS + 5)
 
-        # Separate settled events (history) and confirmed future events
         self.settled_history = []
-        self.future_debits = []   # list of (date, amount, event_id, category, flexibility, min_amount)
-        self.future_credits = []  # list of (date, amount, event_id, category)
-        self.recurring_debits = []  # projected monthly debits
+        self.future_debits = []
+        self.future_credits = []
+        self.recurring_debits = []
 
-        # --- Settled events (history) ---
-        settled_debits_by_cat = defaultdict(list)  # category -> list of (date, amount)
+        settled_debits_by_cat = defaultdict(list)
         salary_settled = []
 
         for e in self._all_events:
@@ -372,14 +316,15 @@ class UserFinancialState:
                 self.settled_history.append(e)
                 if direction == config.DEBIT and etype not in config.NON_RECURRING_EVENT_TYPES:
                     if cat not in config.NON_RECURRING_EVENT_TYPES:
-                        settled_debits_by_cat[cat].append((sdate, amount, e.get('event_id'), e.get('flexibility', 'fixed'), e.get('minimum_allowed_amount')))
+                        settled_debits_by_cat[cat].append((
+                            sdate, amount, e.get('event_id'),
+                            e.get('flexibility', 'fixed'),
+                            e.get('minimum_allowed_amount'),
+                        ))
                 if direction == config.CREDIT and etype in ('income', 'salary') and cat == 'salary':
-                    # Only collect entries with a valid amount for salary projection
                     raw_amt = e.get('amount_home')
                     if raw_amt is not None and raw_amt > 0:
                         salary_settled.append((sdate, raw_amt))
-                # Also track non-salary recurring credits (freelance, reimbursement,
-                # investment_sale proceeds already settled) for income gap detection
                 elif direction == config.CREDIT and etype not in config.NON_RECURRING_EVENT_TYPES:
                     if not e.get('_ignored') and not e.get('_is_reimbursement'):
                         raw_amt = e.get('amount_home')
@@ -393,22 +338,17 @@ class UserFinancialState:
                     self.future_debits.append((
                         sdate, amount, e.get('event_id'), cat,
                         e.get('flexibility', 'fixed'),
-                        e.get('minimum_allowed_amount')
+                        e.get('minimum_allowed_amount'),
                     ))
                 elif direction == config.CREDIT and etype not in config.NON_RECURRING_EVENT_TYPES:
-                    # Only count confirmed credits (salary scheduled)
                     self.future_credits.append((sdate, amount, e.get('event_id'), cat))
                 elif direction == config.CREDIT and e.get('_force_settled'):
                     self.future_credits.append((sdate, amount, e.get('event_id'), cat))
 
-        # --- Detect and project recurring debits ---
         self._detect_recurring(settled_debits_by_cat, rd, horizon)
-
-        # --- Project recurring salary ---
         self._project_salary(salary_settled, rd, horizon)
 
-    # Categories that appear multiple times per month but are discretionary —
-    # we project them as monthly aggregates only if the user has ≥2 months of history.
+    # Categories that appear multiple times per month but are discretionary.
     _DISCRETIONARY_CATS = frozenset({
         'shopping', 'dining', 'entertainment', 'transport',
         'personal_care', 'hobbies', 'travel', 'gifts',
@@ -436,7 +376,7 @@ class UserFinancialState:
         Settled events are already in current_available_balance — we only
         project future months, never the current partial month.
         """
-        _dd = defaultdict  # local alias
+        _dd = defaultdict
 
         for cat, entries in settled_debits_by_cat.items():
             if not entries:
@@ -444,7 +384,6 @@ class UserFinancialState:
 
             entries_sorted = sorted(entries, key=lambda x: x[0] or date.min)
 
-            # Use last 6 months of history for pattern detection
             cutoff = start - timedelta(days=180)
             recent = [
                 (d, amt, eid, flex, min_amt)
@@ -462,7 +401,6 @@ class UserFinancialState:
             last_eid  = recent[-1][2]
             rent_amt  = getattr(self, '_rent_base_amount', None)
 
-            # Count entries per calendar month
             months_seen = _dd(list)
             for d, amt, eid, flex, min_amt in recent:
                 if d:
@@ -473,14 +411,11 @@ class UserFinancialState:
             avg_per_month = total_entries / max(n_months, 1)
 
             if avg_per_month >= 1.8:
-                # ── AGGREGATED MONTHLY ──────────────────────────────────
-                # Require ≥2 months of history for discretionary categories
                 if cat in self._DISCRETIONARY_CATS and n_months < 2:
                     continue
 
                 current_ym = (start.year, start.month)
 
-                # Complete prior months only (exclude current partial month)
                 complete_months = {
                     ym: vals
                     for ym, vals in months_seen.items()
@@ -489,14 +424,11 @@ class UserFinancialState:
                 if not complete_months:
                     complete_months = dict(months_seen)
 
-                # ── 3-month rolling median ──────────────────────────────
                 sorted_yms   = sorted(complete_months.keys())
                 last3_yms    = sorted_yms[-3:]
                 last3_totals = sorted(sum(complete_months[ym]) for ym in last3_yms)
                 median_monthly = last3_totals[len(last3_totals) // 2]
 
-                # If fewer than 2 months available, blend with daily-burn average
-                # to avoid severe under-projection on sparse histories
                 if len(last3_yms) < 2:
                     all_totals    = [sum(v) for v in complete_months.values()]
                     avg_monthly   = sum(all_totals) / len(all_totals) if all_totals else median_monthly
@@ -507,7 +439,6 @@ class UserFinancialState:
 
                 existing_dates = {d for d, _, _, c, _, _ in self.future_debits if c == cat}
 
-                # ── Template: most recent complete calendar month ────────
                 template_ym = None
                 for ym in reversed(sorted_yms):
                     if complete_months.get(ym):
@@ -522,7 +453,6 @@ class UserFinancialState:
                     ]
 
                 if not template:
-                    # Fallback: last 30-day window
                     window_start = last_date - timedelta(days=29)
                     template = [
                         (d, amt) for d, amt, eid, flex, min_amt in entries_sorted
@@ -530,7 +460,6 @@ class UserFinancialState:
                     ]
 
                 if not template:
-                    # Last resort: single lump per month
                     dom = _day_of_month(last_date)
                     lym = (last_date.year, last_date.month)
                     fpm = date(lym[0] + 1, 1, 1) if lym[1] == 12 else date(lym[0], lym[1] + 1, 1)
@@ -542,11 +471,9 @@ class UserFinancialState:
                             ))
                     continue
 
-                # Scale template transactions to the 3-month median total
                 template_total = sum(a for _, a in template)
                 scale = median_monthly / template_total if template_total > 0 else 1.0
 
-                # Replay +30, +60, +90 days
                 for cycle in range(1, 4):
                     shift = timedelta(days=30 * cycle)
                     for orig_d, amt in template:
@@ -558,7 +485,6 @@ class UserFinancialState:
                             ))
 
             else:
-                # ── STRICT MONTHLY ──────────────────────────────────────
                 is_monthly = False
                 if len(recent) >= 2:
                     gaps = []
@@ -591,11 +517,7 @@ class UserFinancialState:
                         ))
 
     def _project_salary(self, salary_settled, start, end):
-        """Project recurring salary forward when not already in future_credits.
-
-        salary_settled is already filtered to entries with amount > 0.
-        """
-        # Nothing to do if salary has ended with no replacement
+        """Project recurring salary forward when not already in future_credits."""
         if getattr(self, '_salary_ended', False) and getattr(self, '_salary_remaining', None) is None:
             return
 
@@ -603,39 +525,23 @@ class UserFinancialState:
             return
 
         salary_sorted = sorted(salary_settled, key=lambda x: x[0] or date.min)
-        if not salary_sorted:
-            return
 
-        # ── Strip one-off mid-cycle entries ──────────────────────────────
-        # A mid-cycle entry is one that arrives < 20 days after the PREVIOUS
-        # entry AND its amount differs significantly from the typical salary
-        # (suggesting it's a bonus/commission, not the regular payday).
-        # We keep it if it looks like a regular payday on a typical day (e.g.
-        # the 15th) even if the gap is short, to avoid stripping the real
-        # salary when there's a close-together bonus.
+        # Strip one-off mid-cycle entries (bonuses/commissions that aren't regular paydays).
         regular = [salary_sorted[0]]
         for i in range(1, len(salary_sorted)):
             prev_d, cur_d = salary_sorted[i - 1][0], salary_sorted[i][0]
-            cur_amt = salary_sorted[i][1]
             gap = (cur_d - prev_d).days if (cur_d and prev_d) else 999
             if gap >= 20:
                 regular.append(salary_sorted[i])
             else:
-                # Short gap — keep if this looks like the regular monthly payday
-                # (i.e., same day-of-month as the first entry, suggesting it's the
-                # 15th-of-month salary that happens to follow a mid-month bonus)
                 first_dom = _day_of_month(salary_sorted[0][0]) if salary_sorted[0][0] else 0
                 cur_dom   = _day_of_month(cur_d) if cur_d else -1
                 if cur_dom == first_dom:
                     regular.append(salary_sorted[i])
-                # else: skip — it's a mid-cycle one-off
 
         if not regular:
             return
 
-        # ── Detect monthly pattern on regular paydays ─────────────────────
-        # Widen to 20–42 days: the upper end handles paydays rescheduled by
-        # a few days (e.g. due to holidays or message-driven date overrides).
         if len(regular) >= 2:
             gaps = []
             for i in range(1, len(regular)):
@@ -644,46 +550,37 @@ class UserFinancialState:
                     gaps.append((d2 - d1).days)
             is_monthly = bool(gaps) and all(20 <= g <= 42 for g in gaps)
         else:
-            is_monthly = True   # single regular entry → assume monthly
+            is_monthly = True
 
         if not is_monthly:
             return
 
-        # ── Base amount: median of last ≤3 regular entries ────────────────
         amounts = sorted(s[1] for s in regular[-3:] if s[1] is not None)
         if not amounts:
             return
         base_amount = amounts[len(amounts) // 2]
 
-        # Message overrides take precedence
         if getattr(self, '_salary_change_amount', None) is not None:
             base_amount = self._salary_change_amount
         elif getattr(self, '_salary_remaining', None) is not None:
             base_amount = self._salary_remaining
 
-        # ── Day-of-month from last regular payday ─────────────────────────
         last_payday = regular[-1][0]
         dom = _day_of_month(last_payday)
 
-        # Honour any message-driven date override for the very first projection
         next_date_override = getattr(self, '_salary_next_date_override', None)
 
-        # Only project from the NEXT expected occurrence after last_payday
         next_expected = last_payday + timedelta(days=28)
         proj_start    = max(start, next_expected)
         projected_dates = _dates_for_day_of_month(dom, proj_start, end)
 
-        # If a date override was given and it falls in our window, use it as
-        # the first payment date (replacing the corresponding DOM date if any)
         if next_date_override and start < next_date_override <= end:
-            # Remove any projected date in the same calendar month as the override
             override_ym = (next_date_override.year, next_date_override.month)
             projected_dates = [d for d in projected_dates
                                if (d.year, d.month) != override_ym]
             projected_dates = [next_date_override] + projected_dates
             projected_dates.sort()
 
-        # Exclude dates already covered by confirmed future salary credits
         existing_credit_dates = {
             d for d, _, _, cat in self.future_credits
             if cat in ('salary', 'income')
@@ -706,14 +603,10 @@ class UserFinancialState:
                 amt = base_amount
             self.future_credits.append((pd, amt, '_proj_salary', 'salary'))
 
-    # ------------------------------------------------------------------
-    # Public helpers
-    # ------------------------------------------------------------------
-
     def all_future_debits(self, stop_events=None, reduce_events=None):
         """Return combined future debits (confirmed + recurring) with optional spending changes.
 
-        stop_events : set of event_id prefixes to stop (amount -> 0)
+        stop_events   : set of event_id prefixes to stop (amount -> 0)
         reduce_events : dict of event_id_prefix -> new_amount
         """
         stop_events = stop_events or set()
@@ -729,7 +622,6 @@ class UserFinancialState:
             if key in seen:
                 continue
             seen.add(key)
-            # Apply spending changes
             base_eid = eid.replace('_proj', '')
             if base_eid in stop_events or eid in stop_events:
                 amt = 0.0
@@ -744,7 +636,7 @@ class UserFinancialState:
         """Return sorted future credits."""
         return sorted(
             [(d, amt, eid, cat) for d, amt, eid, cat in self.future_credits if d is not None],
-            key=lambda x: x[0]
+            key=lambda x: x[0],
         )
 
     def flexible_recurring_debits(self):

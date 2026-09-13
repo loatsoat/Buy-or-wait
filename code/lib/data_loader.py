@@ -17,7 +17,6 @@ def parse_date(s):
     s = s.strip()
     if not s:
         return None
-    # dates are YYYY-MM-DD; sent_at may be full ISO timestamps
     if "T" in s:
         s = s.split("T")[0]
     return datetime.strptime(s, "%Y-%m-%d").date()
@@ -53,13 +52,16 @@ class Dataset:
         self.images_raw = _read_csv(os.path.join(dataset_dir, "images.csv"))
 
         self.profiles = {p["user_id"]: self._norm_profile(p) for p in self.profiles_raw}
+
         self.events_by_user = {}
         for e in self.events_raw:
             self.events_by_user.setdefault(e["user_id"], []).append(self._norm_event(e))
 
         self.payment_options_by_request = {}
         for po in self.payment_options_raw:
-            self.payment_options_by_request.setdefault(po["request_id"], []).append(self._norm_payment_option(po))
+            self.payment_options_by_request.setdefault(po["request_id"], []).append(
+                self._norm_payment_option(po)
+            )
 
         self.messages_by_user = {}
         self.messages_by_request = {}

@@ -1,21 +1,11 @@
-"""Currency conversion using exchange_rates.csv.
-
-Rates are only given for a handful of directed pairs on specific dates
-(monthly snapshots). To convert between any two of the five dataset
-currencies we build an undirected graph per date (inverting a rate r
-A->B gives B->A as 1/r) and do a BFS shortest path, multiplying edge
-rates along the way. For a requested date we use the closest available
-rate date (preferring the most recent one on or before the target date,
-falling back to the nearest date overall if none precede it).
-"""
+"""Currency conversion using exchange_rates.csv with BFS path finding."""
 from collections import defaultdict, deque
+from datetime import date
 
 
 class CurrencyConverter:
     def __init__(self, rates_raw):
-        # rates_by_date[date_str] = list of (from_cur, to_cur, rate)
         self.rates_by_date = defaultdict(list)
-        self.all_dates = []
         for r in rates_raw:
             d = r["rate_date"]
             self.rates_by_date[d].append((r["from_currency"], r["to_currency"], float(r["rate"])))
@@ -28,7 +18,6 @@ class CurrencyConverter:
         prior = [d for d in self.all_dates if d <= target_date_str]
         if prior:
             return prior[-1]
-        # no prior date available: fall back to nearest overall
         return min(self.all_dates, key=lambda d: abs(_date_diff(d, target_date_str)))
 
     def _graph(self, date_key):
@@ -74,8 +63,6 @@ class CurrencyConverter:
 
 
 def _date_diff(d1, d2):
-    from datetime import date
-
     def p(s):
         y, m, day = s.split("-")
         return date(int(y), int(m), int(day))

@@ -23,8 +23,7 @@ FLEXIBLE_REDUCIBLE = {"reducible", "reducible_or_stoppable"}
 
 MAX_SPENDING_CHANGES = 3
 
-# Categories that are one-off/uncertain in nature and should never be
-# projected forward as recurring, even if they repeat by chance.
+# Categories that are one-off/uncertain and should never be projected as recurring.
 NON_RECURRING_EVENT_TYPES = {
     "refund",
     "investment_purchase",

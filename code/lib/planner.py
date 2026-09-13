@@ -12,6 +12,7 @@ Priority (per spec):
 """
 
 from datetime import timedelta
+from itertools import combinations
 from . import config
 from .forecast import (
     build_balance_timeline,
@@ -222,23 +223,20 @@ def _try_with_spending_changes(
     forecast_days, astp_base, efpd_base
 ):
     """Try combinations of flexible spending changes to unlock plans."""
-    from itertools import combinations
-
-    profile = user_state.profile
+    profile      = user_state.profile
     willing_stop = profile.get('expense_categories_user_is_willing_to_stop', set())
     willing_reduce = profile.get('expense_categories_user_is_willing_to_reduce', set())
-    protected = profile.get('expense_categories_to_protect', set())
+    protected    = profile.get('expense_categories_to_protect', set())
 
-    # How far short is the base plan? Only changes whose 90-day saving is
-    # at least 50% of the gap are worth considering — this prevents trivially
-    # small subscriptions from appearing as spending_changes when the user's
-    # budget is tight but the saving makes no real difference.
+    # Compute the gap: how much more astp is needed to make the plan safe.
+    # Only spending changes whose 90-day saving covers ≥50% of the gap are
+    # considered — prevents trivially small subscriptions from appearing as
+    # required changes when they cannot materially close the shortfall.
     base_debits  = user_state.all_future_debits()
     base_credits = user_state.all_future_credits()
-    from .forecast import build_balance_timeline, amount_safe_to_pay_today
-    base_tl   = build_balance_timeline(rd, user_state.balance, base_debits, base_credits, forecast_days)
-    base_astp = amount_safe_to_pay_today(base_tl, rd, forecast_days, min_bal, requested)
-    gap = max(0.0, requested - base_astp)   # how much more we need to unlock
+    base_tl      = build_balance_timeline(rd, user_state.balance, base_debits, base_credits, forecast_days)
+    base_astp    = amount_safe_to_pay_today(base_tl, rd, forecast_days, min_bal, requested)
+    gap          = max(0.0, requested - base_astp)
 
     # Build list of candidate spending changes
     possible_stops   = []   # (event_id, category, monthly_amount)

@@ -3,22 +3,17 @@
 Uses only already-computed numbers — never invents unsupported facts.
 """
 
-from datetime import date
-
 
 def _fmt_amount(amount, currency):
-    """Format an amount with currency symbol."""
+    """Format a monetary amount with its currency symbol."""
     if amount is None:
         return 'N/A'
-    if currency in ('IDR', 'INR'):
-        # Indian/Indonesian style with comma separators
-        s = f'{amount:,.0f}'
-    else:
-        s = f'{amount:,.2f}'
+    s = f'{amount:,.0f}' if currency in ('IDR', 'INR') else f'{amount:,.2f}'
     return f'{currency} {s}'
 
 
 def _fmt_date(d):
+    """Format a date as DD Month YYYY."""
     if d is None:
         return 'N/A'
     return d.strftime('%d %B %Y')
@@ -36,9 +31,9 @@ def generate_explanation(
 ):
     cur = profile.get('home_currency', '')
     requested = request.get('requested_amount', 0)
-    deadline = request.get('desired_completion_date')
     min_bal_fmt = _fmt_amount(min_balance, cur)
     req_fmt = _fmt_amount(requested, cur)
+    deadline = request.get('desired_completion_date')
 
     sc_desc = ''
     if spending_changes_needed:
@@ -51,7 +46,7 @@ def generate_explanation(
         sc_desc = ', '.join(actions)
 
     if method == 'full_payment':
-        pay_date, pay_amt = plan_schedule[0] if plan_schedule else (request.get('request_date'), requested)
+        pay_date = plan_schedule[0][0] if plan_schedule else request.get('request_date')
         if spending_changes_needed:
             return (f"{sc_desc.capitalize()}, then pay {req_fmt} on {_fmt_date(pay_date)}. "
                     f"This keeps the {min_bal_fmt} minimum protected.")
@@ -65,9 +60,8 @@ def generate_explanation(
     elif method == 'installments':
         n = len(plan_schedule)
         if plan_schedule:
-            pay_amt = plan_schedule[0][1]
             first_date = plan_schedule[0][0]
-            pay_fmt = _fmt_amount(pay_amt, cur)
+            pay_fmt = _fmt_amount(plan_schedule[0][1], cur)
             if spending_changes_needed:
                 return (f"{sc_desc.capitalize()}, then use {n} installments of {pay_fmt}, "
                         f"starting {_fmt_date(first_date)}. "
