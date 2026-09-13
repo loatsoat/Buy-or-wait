@@ -11,7 +11,7 @@ Priority (per spec):
   6. Lowest payment_option_id (tie-breaker)
 """
 
-from datetime import timedelta
+from datetime import timedelta, date
 from itertools import combinations
 from . import config
 from .forecast import (
@@ -201,13 +201,22 @@ def select_plan(
     # ------------------------------------------------------------------
     # 5. Try plans WITH spending changes
     # ------------------------------------------------------------------
-    # Only try if NO safe plan found without spending changes
-    if not candidates:
-        candidates += _try_with_spending_changes(
+    # Try spending changes when:
+    #   a) No safe plan was found without changes, OR
+    #   b) The best safe plan found does not complete by the deadline
+    #      (spending changes might unlock a cheaper/earlier plan that does)
+    best_without_changes = min(candidates, key=_plan_key) if candidates else None
+    needs_spending_change_search = (
+        not candidates
+        or (best_without_changes is not None and not best_without_changes['completes_by_deadline'])
+    )
+    if needs_spending_change_search:
+        spending_change_candidates = _try_with_spending_changes(
             request, user_state, payment_options, rd, requested, deadline,
             allows_partial, payment_methods_ok, max_install_months, min_bal,
             forecast_days, astp, efpd
         )
+        candidates += spending_change_candidates
 
     if not candidates:
         return None

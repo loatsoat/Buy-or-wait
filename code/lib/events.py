@@ -18,12 +18,6 @@ except Exception:
         return None
 
 
-def _to_str(d):
-    if d is None:
-        return None
-    return d.strftime('%Y-%m-%d')
-
-
 def _day_of_month(d):
     return d.day
 
@@ -87,7 +81,8 @@ class UserFinancialState:
             if amount is not None and cur != self.home_currency and settle_date:
                 try:
                     amount = self._converter.convert(
-                        amount, cur, self.home_currency, _to_str(settle_date)
+                        amount, cur, self.home_currency,
+                        settle_date.strftime('%Y-%m-%d') if hasattr(settle_date, 'strftime') else settle_date
                     )
                 except Exception:
                     pass
@@ -110,6 +105,17 @@ class UserFinancialState:
                         for e in self._all_events:
                             if e['event_id'] == eid:
                                 e['_ignored'] = True
+                    else:
+                        # No specific event_id means the message says all projected
+                        # income from a gig/payout platform is not yet withdrawable.
+                        # Only suppress salary projection when the ignore is for
+                        # a pending payout (not a refund/prize/investment).
+                        text = msg.get('message_text', '').lower()
+                        is_gig_payout = any(kw in text for kw in (
+                            'payout', 'earnings', 'withdrawable', 'withdrawn',
+                        ))
+                        if is_gig_payout:
+                            self._suppress_salary_projection = True
 
                 elif atype == 'settled_credit':
                     eid = amd.get('event_id')
@@ -183,6 +189,23 @@ class UserFinancialState:
                     if amount is not None:
                         self._salary_resume_amount = amount
                         self._salary_resume_date = eff_date
+                        # Inject a scheduled salary event so _project_salary has
+                        # a concrete anchor to project from.
+                        if eff_date is not None:
+                            self._all_events.append({
+                                'event_id': '_msg_salary_resume',
+                                'user_id': self.user_id,
+                                'event_type': 'income',
+                                'category': 'salary',
+                                'direction': config.CREDIT,
+                                'amount_home': amount,
+                                'currency': self.home_currency,
+                                'event_date': eff_date,
+                                'settlement_date': eff_date,
+                                'status': 'scheduled',
+                                'flexibility': 'fixed',
+                                '_msg_injected': True,
+                            })
 
                 elif atype == 'salary_date':
                     new_date = amd.get('new_date')
@@ -376,8 +399,6 @@ class UserFinancialState:
         Settled events are already in current_available_balance — we only
         project future months, never the current partial month.
         """
-        _dd = defaultdict
-
         for cat, entries in settled_debits_by_cat.items():
             if not entries:
                 continue
@@ -401,7 +422,7 @@ class UserFinancialState:
             last_eid  = recent[-1][2]
             rent_amt  = getattr(self, '_rent_base_amount', None)
 
-            months_seen = _dd(list)
+            months_seen = defaultdict(list)
             for d, amt, eid, flex, min_amt in recent:
                 if d:
                     months_seen[(d.year, d.month)].append(amt)
@@ -474,7 +495,14 @@ class UserFinancialState:
                 template_total = sum(a for _, a in template)
                 scale = median_monthly / template_total if template_total > 0 else 1.0
 
-                for cycle in range(1, 4):
+                # High-frequency discretionary categories (transport, groceries, dining)
+                # are the most uncertain in the 3rd projection cycle; use only 2 cycles
+                # for categories with more than 3 entries per month to avoid over-projection.
+                max_cycles = 3
+                if avg_per_month > 3 and cat in self._DISCRETIONARY_CATS:
+                    max_cycles = 2
+
+                for cycle in range(1, max_cycles + 1):
                     shift = timedelta(days=30 * cycle)
                     for orig_d, amt in template:
                         proj_d = orig_d + shift
@@ -521,6 +549,11 @@ class UserFinancialState:
         if getattr(self, '_salary_ended', False) and getattr(self, '_salary_remaining', None) is None:
             return
 
+        # Suppress projection when the income message explicitly says the
+        # upcoming payout is not yet settled (e.g. gig-platform pending payout).
+        if getattr(self, '_suppress_salary_projection', False):
+            return
+
         if not salary_settled:
             return
 
@@ -550,6 +583,13 @@ class UserFinancialState:
                     gaps.append((d2 - d1).days)
             is_monthly = bool(gaps) and all(20 <= g <= 42 for g in gaps)
         else:
+            is_monthly = True
+
+        # If salary_resume was triggered, we always project from the resume date
+        # even if the history has irregular gaps (e.g. maternity/sick leave gaps).
+        resume_amount = getattr(self, '_salary_resume_amount', None)
+        resume_date   = getattr(self, '_salary_resume_date', None)
+        if resume_amount is not None and resume_date is not None:
             is_monthly = True
 
         if not is_monthly:
@@ -586,10 +626,8 @@ class UserFinancialState:
             if cat in ('salary', 'income')
         }
 
-        resume_date   = getattr(self, '_salary_resume_date', None)
-        resume_amount = getattr(self, '_salary_resume_amount', None)
-        temp_amount   = getattr(self, '_salary_temp_amount', None)
-        used_temp     = False
+        temp_amount = getattr(self, '_salary_temp_amount', None)
+        used_temp   = False
 
         for pd in projected_dates:
             if pd in existing_credit_dates:

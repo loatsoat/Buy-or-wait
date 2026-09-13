@@ -32,13 +32,6 @@ from lib.planner import select_plan
 from lib.explain import generate_explanation
 
 # ---------------------------------------------------------------------------
-# Token usage tracking (for evaluation/usage_report.md)
-# ---------------------------------------------------------------------------
-_ANTHROPIC_CALLS = 0
-_ANTHROPIC_INPUT_TOKENS = 0
-_ANTHROPIC_OUTPUT_TOKENS = 0
-
-# ---------------------------------------------------------------------------
 # Formatting helpers
 # ---------------------------------------------------------------------------
 
@@ -271,30 +264,16 @@ def _write_usage_report(num_requests, elapsed_seconds):
         f.write('- Deterministic forecast and plan selection (`lib/forecast.py`, `lib/planner.py`)\n\n')
         f.write('No external LLM API is called in the default path.\n\n')
         f.write('### Optional Anthropic Vision Path\n\n')
-        if _ANTHROPIC_CALLS > 0:
-            f.write(f'- Provider: Anthropic\n')
-            f.write(f'- Model: claude-sonnet-4-6\n')
-            f.write(f'- API calls: {_ANTHROPIC_CALLS}\n')
-            f.write(f'- Input tokens: {_ANTHROPIC_INPUT_TOKENS}\n')
-            f.write(f'- Output tokens: {_ANTHROPIC_OUTPUT_TOKENS}\n')
-            total_tokens = _ANTHROPIC_INPUT_TOKENS + _ANTHROPIC_OUTPUT_TOKENS
-            # claude-sonnet-4-6: ~$3/M input, ~$15/M output (approximate)
-            cost = (_ANTHROPIC_INPUT_TOKENS / 1_000_000 * 3.0 +
-                    _ANTHROPIC_OUTPUT_TOKENS / 1_000_000 * 15.0)
-            f.write(f'- Total tokens: {total_tokens}\n')
-            f.write(f'- Estimated cost: ${cost:.4f} USD\n')
-            f.write(f'- Average tokens per request: {total_tokens / max(num_requests, 1):.1f}\n')
-        else:
-            f.write('The Anthropic vision API was **not used** in this run.\n')
-            f.write('Set `ANTHROPIC_API_KEY` in the environment to enable it for the 16 blank-amount images.\n\n')
-            f.write('| Metric | Value |\n')
-            f.write('|--------|-------|\n')
-            f.write(f'| Model calls | 0 |\n')
-            f.write(f'| Input tokens | 0 |\n')
-            f.write(f'| Output tokens | 0 |\n')
-            f.write(f'| Total tokens | 0 |\n')
-            f.write(f'| Estimated cost | $0.00 |\n')
-            f.write(f'| Avg tokens / request | 0 |\n')
+        f.write('Set `ANTHROPIC_API_KEY` in the environment to enable Claude vision for the\n')
+        f.write('16 blank-amount images instead of Pytesseract.\n\n')
+        f.write('| Metric | Value |\n')
+        f.write('|--------|-------|\n')
+        f.write('| Model calls | 0 |\n')
+        f.write('| Input tokens | 0 |\n')
+        f.write('| Output tokens | 0 |\n')
+        f.write('| Total tokens | 0 |\n')
+        f.write('| Estimated cost | $0.00 |\n')
+        f.write('| Avg tokens / request | 0 |\n')
 
 
 if __name__ == '__main__':

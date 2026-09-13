@@ -18,8 +18,8 @@ No external LLM API is called in the default path.
 
 ### Optional Anthropic Vision Path
 
-The Anthropic vision API was **not used** in this run.
-Set `ANTHROPIC_API_KEY` in the environment to enable it for the 16 blank-amount images.
+Set `ANTHROPIC_API_KEY` in the environment to enable Claude vision for the
+16 blank-amount images instead of Pytesseract.
 
 | Metric | Value |
 |--------|-------|
