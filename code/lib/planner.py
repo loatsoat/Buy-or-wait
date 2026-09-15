@@ -203,12 +203,20 @@ def select_plan(
     # ------------------------------------------------------------------
     # Try spending changes when:
     #   a) No safe plan was found without changes, OR
-    #   b) The best safe plan found does not complete by the deadline
-    #      (spending changes might unlock a cheaper/earlier plan that does)
+    #   b) The best safe plan found does not complete by the deadline, OR
+    #   c) A safe plan exists but the 90-day floor margin is thin enough
+    #      that the truth may require spending changes (astp within 5% of
+    #      requested means we are at the boundary — try changes too)
     best_without_changes = min(candidates, key=_plan_key) if candidates else None
+    floor_is_thin = (
+        best_without_changes is not None
+        and best_without_changes['method'] in ('full_payment',)
+        and astp >= requested * 0.95  # within 5% of requested
+    )
     needs_spending_change_search = (
         not candidates
         or (best_without_changes is not None and not best_without_changes['completes_by_deadline'])
+        or floor_is_thin
     )
     if needs_spending_change_search:
         spending_change_candidates = _try_with_spending_changes(
