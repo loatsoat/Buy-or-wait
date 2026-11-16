@@ -1,65 +1,26 @@
 # Token Usage and Cost Report
 
-## Final Full-Dataset Run
+Written by `code/main.py` for the run that produced `dataset/output.csv`.
 
 | Metric | Value |
 |--------|-------|
-| Total requests processed | 250 |
-| Total wall-clock time | 1.3s |
-| Average time per request | 0.005s |
+| Requests processed | 250 |
+| Model provider | Anthropic |
+| Model | claude-opus-5-5 |
+| Model calls in this run | 0 |
+| Input tokens | 0 |
+| Output tokens | 0 |
+| Total tokens | 0 |
+| Average tokens per request | 0.0 |
+| Estimated total cost (USD) | 0.0000 |
+| Estimated cost per request (USD) | 0.000000 |
+| Document findings served from cache | 16 |
+| Wall-clock time | 0.6s |
 
----
-
-## AI Components
-
-### 1. Pytesseract OCR (local, open-source)
-
-Extracts monetary amounts from up to 16 blank-amount financial document images.
-
-| Metric | Value |
-|--------|-------|
-| Provider | Tesseract OCR (local) |
-| Images processed | up to 16 |
-| API calls | 0 (local) |
-| Estimated cost | $0.00 |
-
-### 2. Anthropic Claude Vision (optional)
-
-When `ANTHROPIC_API_KEY` is set, replaces Pytesseract for higher accuracy.
-
-| Metric | Value |
-|--------|-------|
-| Provider | Anthropic |
-| Model | claude-sonnet-4-5 |
-| Max API calls | 16 (one per blank-amount image) |
-| Est. input tokens per call | ~1,500 |
-| Est. output tokens per call | ~10 |
-| Est. total tokens (all 16) | ~24,160 |
-| Est. avg tokens per request | ~97 |
-| Est. total cost | ~$0.036 USD |
-| Est. cost per request | ~$0.00014 USD |
-
-**This run:** Anthropic vision was **not active** (ANTHROPIC_API_KEY not set).
-
----
-
-## Rule-Based AI Components
-
-| Component | Description |
-|-----------|-------------|
-| `lib/messages_nlp.py` | 20 regex pattern families, 96 messages parsed, 5 languages |
-| `lib/events.py` | Recurring pattern detection, salary projection, message-driven state mutation |
-| `lib/forecast.py` | O(n) suffix-minimum forecaster, 90-day balance simulation |
-| `lib/planner.py` | 6-level plan ranking, spending-change combinatorial search |
-
----
-
-## Cost Summary
-
-| Component | Cost |
-|-----------|------|
-| Pytesseract OCR | $0.00 |
-| Anthropic Claude Vision (if enabled) | ~$0.036 |
-| Rule-based NLP + forecasting | $0.00 |
-| **Total (this run, no Anthropic)** | **$0.00** |
-| **Total (with Anthropic)** | **~$0.036** |
+The model is used only to read the document images behind blank ledger amounts
+(`lib/investigator.py`). Findings are cached in `code/evidence_cache.json`, keyed by
+image hash, so a rerun on unchanged images makes no model calls. Each cache entry
+records its `source`; entries whose source starts with `seeded` were read in a
+development session and cost no API tokens. Run `python code/main.py
+--refresh-evidence` with `ANTHROPIC_API_KEY` set to regenerate them through the API
+and get measured token counts here. Cost uses $4.00 / $20.00 per million input / output tokens.

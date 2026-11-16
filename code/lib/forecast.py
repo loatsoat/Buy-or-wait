@@ -1,142 +1,53 @@
-"""Daily balance forecasting and safe-payment computation.
+"""90-day balance forecast and the two safe-payment figures derived from it.
 
-Core idea:
-  balance[t] = opening_balance
-               + sum(credits on or before t)
-               - sum(debits on or before t)
+The timeline holds each day's closing balance after that day's debits, credits and any
+payment of the plan being tested. The ledger gives dates, not times, so a bill and a
+salary on the same day are netted.
 
-To pay X on day T:
-  balance[t] -= X  for all t >= T
-
-A payment of X on day T is safe iff:
-  min(balance[T], balance[T+1], ..., balance[horizon]) >= min_balance
-
-We want the LARGEST X safe to pay today (amount_safe_to_pay) and the
-EARLIEST future date when the full requested amount is safe.
-
-We use a running-minimum approach:
-  Let floor_after_T = min(balance[t] for t in [T, horizon])
-  slack = floor_after_T - min_balance
-  amount_safe = min(requested_amount, max(0, slack))
+Paying X on day T lowers every balance from T onward by X, so it is safe exactly when
+min(timeline[T:]) - X >= minimum balance.
 """
 from datetime import timedelta
 
+from . import config
 
-def build_balance_timeline(
-    start_date,
-    opening_balance,
-    future_debits,
-    future_credits,
-    forecast_days=90,
-):
-    """Return a dict {date: projected_balance} from start_date to start_date+forecast_days.
+_EPS = 0.005
 
-    The balance on each day is the ending balance after all credits and debits
-    that settle on that day.
+
+def build_balance_timeline(start_date, opening_balance, debits, credits, payments=()):
+    """Return closing balances for start_date .. start_date + FORECAST_DAYS (one per day).
+
+    debits/credits/payments are (date, amount) pairs; flows outside the window are ignored.
     """
-    horizon = start_date + timedelta(days=forecast_days)
-
-    net = {}
-    for d, amt, eid, cat in future_debits:
-        if d is not None and start_date <= d <= horizon:
-            net[d] = net.get(d, 0.0) - amt
-    for d, amt, eid, cat in future_credits:
-        if d is not None and start_date <= d <= horizon:
-            net[d] = net.get(d, 0.0) + amt
-
-    timeline = {}
-    bal = opening_balance
-    cur = start_date
-    while cur <= horizon:
-        bal += net.get(cur, 0.0)
-        timeline[cur] = bal
-        cur += timedelta(days=1)
+    days = config.FORECAST_DAYS + 1
+    net = [0.0] * days
+    for flows, sign in ((debits, -1), (payments, -1), (credits, 1)):
+        for day, amount in flows:
+            offset = (day - start_date).days
+            if 0 <= offset < days:
+                net[offset] += sign * amount
+    timeline, balance = [], opening_balance
+    for change in net:
+        balance += change
+        timeline.append(balance)
     return timeline
 
 
-def amount_safe_to_pay_today(timeline, start_date, forecast_days, min_balance, requested_amount):
-    """Return the maximum safe payment amount on start_date.
-
-    Paying X today reduces every balance from start_date onwards by X.
-    Safe iff  min(timeline[start_date:]) - X >= min_balance.
-    """
-    horizon = start_date + timedelta(days=forecast_days)
-    cur = start_date
-    floor_val = None
-    while cur <= horizon:
-        b = timeline.get(cur)
-        if b is not None:
-            if floor_val is None or b < floor_val:
-                floor_val = b
-        cur += timedelta(days=1)
-    if floor_val is None:
-        floor_val = timeline.get(start_date, 0.0)
-    slack = floor_val - min_balance
-    return min(requested_amount, max(0.0, slack))
+def amount_safe_to_pay_today(timeline, min_balance, requested_amount):
+    """Largest payment on day 0 that keeps every day at or above min_balance, capped at the request."""
+    return min(requested_amount, max(0.0, min(timeline) - min_balance))
 
 
-def earliest_full_payment_date(timeline, start_date, forecast_days, min_balance, requested_amount):
-    """Return the earliest date d >= start_date when paying requested_amount is safe.
-
-    A payment on date T is safe iff min(balance[T..horizon]) - requested_amount >= min_balance.
-    Scans forward with a precomputed suffix-minimum for O(n) performance.
-
-    Returns None if no such date exists within the forecast window.
-    """
-    horizon = start_date + timedelta(days=forecast_days)
-
-    all_dates = []
-    cur = start_date
-    while cur <= horizon:
-        all_dates.append(cur)
-        cur += timedelta(days=1)
-
-    if not all_dates:
-        return None
-
-    sfx_min = {}
-    running_min = None
-    for d in reversed(all_dates):
-        b = timeline.get(d)
-        if b is not None:
-            if running_min is None or b < running_min:
-                running_min = b
-        sfx_min[d] = running_min
-
-    for d in all_dates:
-        floor_val = sfx_min.get(d)
-        if floor_val is None:
-            continue
-        if floor_val - requested_amount >= min_balance - 0.005:
-            return d
-
+def earliest_full_payment_date(timeline, start_date, min_balance, requested_amount):
+    """First date on which the full amount is safe as one payment, or None within the window."""
+    suffix_min = list(timeline)
+    for i in range(len(suffix_min) - 2, -1, -1):
+        suffix_min[i] = min(suffix_min[i], suffix_min[i + 1])
+    for offset, floor in enumerate(suffix_min):
+        if floor - requested_amount >= min_balance - _EPS:
+            return start_date + timedelta(days=offset)
     return None
 
 
-def build_timeline_with_payments(
-    start_date,
-    opening_balance,
-    future_debits,
-    future_credits,
-    payment_schedule,
-    forecast_days=90,
-):
-    """Build a timeline that includes a specific payment schedule."""
-    extra_debits = [(d, amt, '_payment', 'payment') for d, amt in payment_schedule]
-    return build_balance_timeline(
-        start_date, opening_balance,
-        list(future_debits) + extra_debits,
-        future_credits,
-        forecast_days,
-    )
-
-
-def is_plan_safe(timeline, start_date, forecast_days, min_balance, payment_schedule):
-    """Return True if every day's balance stays >= min_balance with the given payment schedule."""
-    horizon = start_date + timedelta(days=forecast_days)
-    cur = start_date
-    while cur <= horizon:
-        if timeline.get(cur, float('inf')) < min_balance - 0.005:
-            return False
-        cur += timedelta(days=1)
-    return True
+def is_safe(timeline, min_balance):
+    return min(timeline) >= min_balance - _EPS

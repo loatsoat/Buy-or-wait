@@ -1,160 +1,77 @@
 # Buy or Wait? — AI Financial Decision Agent
 
-An AI-powered pipeline that decides whether a user can safely afford a
-requested expense. For each request it produces: the safe amount to pay
-today, an affordability verdict, the recommended payment method and plan,
-the earliest date a full payment is safe, any spending adjustments needed,
-and a grounded explanation.
+For each request in `dataset/requests.csv` the agent decides how much the user can safely
+pay today, whether the full amount is affordable now, with a plan, later or not at all,
+which payment method and schedule to use, the earliest safe date for a full payment, which
+flexible expenses must change, and a one-line explanation.
 
----
+A full walkthrough of every file, every design choice and the background knowledge behind
+it is in [code/DOCUMENTATION.md](code/DOCUMENTATION.md). The model prompt and tool
+definitions are in [code/prompts.md](code/prompts.md).
 
 ## Setup
 
-```bash
-pip install pillow pytesseract
-```
-
-On Windows, also install Tesseract-OCR from
-https://github.com/UB-Mannheim/tesseract/wiki and add it to your PATH.
-
-Optional — higher-accuracy OCR via Claude vision for the 16 blank-amount images:
+Python 3.9 or newer. The default run needs only the standard library.
 
 ```bash
-# Linux / macOS
-export ANTHROPIC_API_KEY=your_key_here
-
-# Windows PowerShell
-$env:ANTHROPIC_API_KEY = "your_key_here"
+pip install anthropic   # only for --refresh-evidence (re-reading document images with Claude)
 ```
-
----
 
 ## Run
 
-From the repo root:
+From the repository root:
 
 ```bash
-python code/main.py
+python code/main.py                      # writes dataset/output.csv and code/evaluation/usage_report.md
+python code/evaluation/main.py           # accuracy on the 25 labelled samples + output rule check
+python code/evaluation/self_check.py     # assert-based checks of the fail-closed rules
 ```
 
-Reads `dataset/requests.csv` and all 7 supporting files, writes
-`dataset/output.csv` (250 rows), and updates
-`code/evaluation/usage_report.md`.
+`main.py` exits with 0 when every row is clean, 1 when the output breaks a rule (nothing is
+written), and 2 when the file is written but some requests had to be answered conservatively
+because evidence was missing or failed a check.
 
-Typical runtime: **< 1 second**, zero API cost in the default local path.
-
----
-
-## Evaluate
+To re-read the 16 document images through the API instead of the cache:
 
 ```bash
-python code/evaluation/main.py
+export ANTHROPIC_API_KEY=...             # PowerShell: $env:ANTHROPIC_API_KEY = "..."
+python code/main.py --refresh-evidence
 ```
 
-Compares `dataset/output.csv` against the 25 labeled rows in
-`dataset/sample_requests.csv` and runs 10 structural checks across all
-275 output rows.
-
----
-
-## Project Structure
+## Layout
 
 ```
-repo/
-├── code/
-│   ├── main.py                  # Pipeline entry point
-│   ├── prompts.md               # All prompts, model config, decision rules
-│   ├── evaluation/
-│   │   ├── main.py              # Accuracy + structural checks
-│   │   └── usage_report.md      # Token/cost report (auto-generated)
-│   └── lib/
-│       ├── config.py            # Shared constants and enums
-│       ├── currency.py          # Multi-hop FX conversion via BFS graph
-│       ├── data_loader.py       # CSV loading and normalisation
-│       ├── events.py            # Per-user financial state reconstruction
-│       ├── forecast.py          # 90-day timeline, astp, efpd (suffix-minimum)
-│       ├── messages_nlp.py      # 20-family regex message amendment parser
-│       ├── ocr.py               # Document image amount extraction
-│       ├── planner.py           # Plan enumeration and 6-level ranking
-│       └── explain.py           # Template-based explanation generator
-└── dataset/
-    ├── requests.csv             # 250 evaluation requests
-    ├── sample_requests.csv      # 25 labeled examples
-    ├── financial_profiles.csv
-    ├── financial_events.csv
-    ├── exchange_rates.csv
-    ├── request_payment_options.csv
-    ├── messages.csv
-    ├── images.csv
-    ├── output.csv               # Written by main.py
-    └── media/images/            # 16 PNG financial documents
+code/
+├── main.py                 entry point: per-request decision, fail-closed fallback, validation gate
+├── prompts.md              model prompt, tools and the rules that stay in code
+├── DOCUMENTATION.md        detailed design documentation
+├── evidence_cache.json     validated document findings, keyed by image hash
+├── evaluation/
+│   ├── main.py             labelled-sample accuracy + output rule check
+│   ├── self_check.py       assert-based checks of the safety rules
+│   └── usage_report.md     token and cost report (written by main.py)
+└── lib/
+    ├── config.py           constants
+    ├── data_loader.py      CSV loading, request order, identity filter on messages
+    ├── currency.py         dated FX conversion
+    ├── evidence.py         blank amounts: identity check, cache, model, validation
+    ├── investigator.py     bounded Claude tool-use loop that reads one document
+    ├── messages_nlp.py     deterministic message parser (20 amendment families)
+    ├── events.py           per-user financial state: recurring bills, salary, messages
+    ├── forecast.py         90-day balance timeline and the two safe-payment figures
+    ├── planner.py          plan enumeration, safety check, ranking, spending changes
+    ├── explain.py          explanation templates
+    └── validate.py         output rules checked before output.csv is written
 ```
 
----
+## Results (25 labelled samples, `python code/evaluation/main.py`)
 
-## Architecture
-
-The pipeline combines **deterministic rule-based AI** with an optional
-**vision model** for document understanding.
-
-### AI Components
-
-**1. Vision model — document amount extraction (`lib/ocr.py`)**
-
-16 financial events have no amount in the CSV. The amount lives in a linked
-PNG (payslip, receipt, or bill). Two paths:
-
-- **Local (default):** Pytesseract with row-grouping heuristic and 8-signal
-  priority stack (net pay → total paid → grand total → largest number).
-- **Cloud (optional):** Anthropic `claude-sonnet-4-5` via vision API. Prompt
-  asks for the single final monetary amount with no formatting. Costs ~$0.036
-  for all 16 images. Falls back to local if the API call fails.
-
-**2. Message NLP — 20 amendment families (`lib/messages_nlp.py`)**
-
-96 messages in the dataset can amend the financial state: salary changes,
-rent increases, refund detection, gig-payout suppression, invoice
-confirmation, internal transfer netting, and 13 other types. Pure regex —
-deterministic, immune to prompt injection, handles English and Bahasa
-Indonesia.
-
-**3. Financial state reconstruction (`lib/events.py`)**
-
-Detects recurring expense patterns (aggregated monthly vs strict monthly),
-projects salary with gap analysis and message-driven overrides, handles
-leave gaps via salary_resume injection, suppresses unconfirmed gig income.
-
-**4. 90-day safety forecaster (`lib/forecast.py`)**
-
-O(n) suffix-minimum algorithm finds the earliest safe payment date.
-Deterministic timeline simulation with per-day balance tracking.
-
-**5. Plan enumerator and ranker (`lib/planner.py`)**
-
-Tries all eligible payment methods (full, installments, partial, wait) with
-and without spending changes. Ranks by a 6-level priority tuple matching the
-spec exactly. Spending changes are filtered by a materiality threshold
-(90-day saving ≥ 50% of shortfall).
-
-### Design Principle
-
-The core financial arithmetic is deterministic — same inputs, same output,
-every time. The AI (vision model) handles only the one genuinely unstructured
-task: reading a document image. Everything else is math and pattern matching,
-which deterministic code does more reliably than a generative model.
-
-See `code/prompts.md` for all prompts, model parameters, and decision rules.
-
----
-
-## Key Results (labeled sample)
-
-| Field | Accuracy |
-|-------|----------|
-| affordability_status | 84% (21/25) |
-| recommended_payment_method | 92% (23/25) |
-| payment_plan | 89% (16/18) |
-| earliest_date_for_full_payment | 84% (21/25) |
-| spending_changes_needed | 88% (22/25) |
-| decision_explanation | 100% (25/25) |
-| All structural checks | 100% (275/275 rows) |
+| Field | Correct |
+|-------|---------|
+| amount_safe_to_pay (within 1%) | 6/25 |
+| affordability_status | 20/25 |
+| recommended_payment_method | 21/25 |
+| payment_plan | 20/25 |
+| earliest_date_for_full_payment | 19/25 |
+| spending_changes_needed | 21/25 |
+| Output rules on all 250 rows | 0 violations |

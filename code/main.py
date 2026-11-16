@@ -1,311 +1,186 @@
 #!/usr/bin/env python3
-"""Buy or Wait? — main pipeline.
+"""Buy or Wait? pipeline: dataset/requests.csv -> dataset/output.csv.
 
 Usage:
-    python code/main.py
+    python code/main.py                     # evidence from code/evidence_cache.json
+    python code/main.py --refresh-evidence  # re-read every document image with the model
 
-Reads  : dataset/requests.csv  (and all supporting CSVs + images)
-Writes : dataset/output.csv
+Exit codes: 0 clean, 1 output failed validation (nothing written),
+2 written, but some requests were answered conservatively for lack of evidence.
 """
-
 import csv
 import os
 import sys
 import time
 
-# Make sure `code/` is on the path so `lib` is importable whether we run from
-# the repo root or from inside code/
-_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-if _SCRIPT_DIR not in sys.path:
-    sys.path.insert(0, _SCRIPT_DIR)
-
 from lib import config
-from lib.data_loader import Dataset
 from lib.currency import CurrencyConverter
+from lib.data_loader import Dataset
 from lib.events import UserFinancialState
-from lib.forecast import (
-    build_balance_timeline,
-    amount_safe_to_pay_today,
-    earliest_full_payment_date,
-)
-from lib.planner import select_plan
+from lib.evidence import EvidenceError, resolve_blank_amounts
 from lib.explain import generate_explanation
+from lib.forecast import amount_safe_to_pay_today, build_balance_timeline, earliest_full_payment_date
+from lib.investigator import MODEL
+from lib.planner import select_plan
+from lib.validate import output_problems
 
-# ---------------------------------------------------------------------------
-# Formatting helpers
-# ---------------------------------------------------------------------------
+# USD per million tokens (input, output) for investigator.MODEL.
+_PRICE_PER_MTOK = (4.00, 20.00)
+
 
 def _fmt_amount(x):
-    if x is None:
-        return ''
-    # Use up to 2 decimal places, strip trailing zeros but keep at least whole number
-    s = f'{x:.2f}'
-    # Remove trailing zeros after decimal point
-    if '.' in s:
-        s = s.rstrip('0').rstrip('.')
-    return s
+    return f'{x:.2f}'.rstrip('0').rstrip('.')
 
 
-def _fmt_payment_plan(schedule):
-    if not schedule:
-        return 'none'
-    parts = []
-    for d, amt in schedule:
-        parts.append(f'{d.strftime("%Y-%m-%d")}:{_fmt_amount(amt)}')
-    return '|'.join(parts)
+def _fmt_changes(changes):
+    parts = [f"stop:{c['event_id']}" if c['action'] == 'stop'
+             else f"reduce_to:{c['event_id']}:{_fmt_amount(c['new_amount'])}" for c in changes]
+    return '|'.join(parts) or 'none'
 
-
-def _fmt_spending_changes(changes):
-    if not changes:
-        return 'none'
-    parts = []
-    for ch in changes:
-        if ch['action'] == 'stop':
-            parts.append(f"stop:{ch['event_id']}")
-        elif ch['action'] == 'reduce_to':
-            parts.append(f"reduce_to:{ch['event_id']}:{_fmt_amount(ch['new_amount'])}")
-        if len(parts) >= config.MAX_SPENDING_CHANGES:
-            break
-    return '|'.join(parts) if parts else 'none'
-
-
-# ---------------------------------------------------------------------------
-# Core per-request logic
-# ---------------------------------------------------------------------------
 
 def process_request(req, dataset, converter):
-    request_id = req['request_id']
-    user_id = req['user_id']
+    """Return the output row for one request. Raises EvidenceError if its evidence is unusable."""
     rd = req['request_date']
-    requested = req['requested_amount'] or 0.0
-    deadline = req['desired_completion_date']
-
-    profile = dataset.profiles.get(user_id, {})
-    if not profile:
-        # Minimal fallback
-        profile = {
-            'home_currency': 'USD',
-            'current_available_balance': 0.0,
-            'minimum_balance_to_keep': 0.0,
-            'financial_priorities': [],
-            'expense_categories_to_protect': set(),
-            'expense_categories_user_is_willing_to_reduce': set(),
-            'expense_categories_user_is_willing_to_stop': set(),
-            'payment_methods_user_will_consider': {'full_payment'},
-            'max_installment_months': None,
-        }
-
-    events = dataset.events_by_user.get(user_id, [])
-    payment_options = dataset.payment_options_by_request.get(request_id, [])
-    messages_by_user = dataset.messages_by_user.get(user_id, [])
-    images_by_event = dataset.images_by_event
-
-    # Build user financial state
-    user_state = UserFinancialState(
-        user_id=user_id,
+    requested = req['requested_amount']
+    profile = dataset.profiles[req['user_id']]
+    state = UserFinancialState(
+        user_id=req['user_id'],
         profile=profile,
-        events=events,
-        payment_options_by_request=dataset.payment_options_by_request,
-        messages_by_user=messages_by_user,
-        images_by_event=images_by_event,
+        events=dataset.events_by_user.get(req['user_id'], []),
+        messages=dataset.messages_by_user.get(req['user_id'], []),
         converter=converter,
         request_date=rd,
-        images_dir=config.MEDIA_IMAGES_DIR,
     )
 
-    min_bal = user_state.min_balance
+    # Both figures are defined before optional spending changes, whatever plan is chosen.
+    timeline = build_balance_timeline(rd, state.balance, state.all_future_debits(), state.all_future_credits())
+    astp = amount_safe_to_pay_today(timeline, state.min_balance, requested)
+    efpd = earliest_full_payment_date(timeline, rd, state.min_balance, requested)
 
-    # Base timeline (no payment)
-    base_tl = build_balance_timeline(
-        rd,
-        user_state.balance,
-        user_state.all_future_debits(),
-        user_state.all_future_credits(),
-        config.FORECAST_DAYS,
-    )
-
-    # amount_safe_to_pay and earliest_full_payment_date (no spending changes)
-    astp = amount_safe_to_pay_today(base_tl, rd, config.FORECAST_DAYS, min_bal, requested)
-    efpd = earliest_full_payment_date(base_tl, rd, config.FORECAST_DAYS, min_bal, requested)
-
-    # Select best plan
-    best = select_plan(req, user_state, payment_options, base_tl, config.FORECAST_DAYS)
-
-    # Override astp/efpd from best plan if spending changes were needed
-    if best:
-        astp = best.get('astp', astp)
-        efpd = best.get('efpd', efpd)
-
-    # Determine affordability_status and method
-    if best is None:
-        method = 'not_recommended'
-        affordability_status = 'not_affordable'
-        schedule = []
-        spending_changes = []
-        efpd_out = None
+    plan = select_plan(req, state, dataset.payment_options_by_request.get(req['request_id'], []), astp, efpd)
+    if plan is None:
+        method, status, schedule, changes = 'not_recommended', 'not_affordable', [], []
     else:
-        method = best['method']
-        schedule = best['schedule']
-        spending_changes = best.get('spending_changes_needed', [])
-
-        if method == 'full_payment' and schedule and schedule[0][0] == rd:
-            affordability_status = 'affordable_now'
-        elif method in ('installments', 'partial_payment'):
-            affordability_status = 'affordable_with_plan'
-        elif method == 'full_payment' and spending_changes:
-            affordability_status = 'affordable_with_plan'
-        elif method == 'wait':
-            affordability_status = 'affordable_later'
+        method, schedule, changes = plan['method'], plan['schedule'], plan['spending_changes_needed']
+        if method == 'wait':
+            status = 'affordable_later'
+        elif method == 'full_payment' and not changes:
+            status = 'affordable_now'
         else:
-            affordability_status = 'affordable_now'
-
-        # earliest_date_for_full_payment
-        # Must equal request_date for affordable_now
-        if affordability_status == 'affordable_now':
-            efpd_out = rd
-        elif efpd is not None:
-            efpd_out = efpd
-        else:
-            efpd_out = None
-
-    # Build explanation
-    explanation = generate_explanation(
-        method=method,
-        request=req,
-        profile=profile,
-        astp=astp,
-        efpd=efpd_out,
-        plan_schedule=schedule,
-        spending_changes_needed=spending_changes,
-        min_balance=min_bal,
-    )
+            status = 'affordable_with_plan'
 
     return {
-        'request_id': request_id,
+        'request_id': req['request_id'],
         'amount_safe_to_pay': _fmt_amount(astp),
-        'affordability_status': affordability_status,
+        'affordability_status': status,
         'recommended_payment_method': method,
-        'payment_plan': _fmt_payment_plan(schedule),
-        'earliest_date_for_full_payment': efpd_out.strftime('%Y-%m-%d') if efpd_out else '',
-        'spending_changes_needed': _fmt_spending_changes(spending_changes),
-        'decision_explanation': explanation,
+        'payment_plan': '|'.join(f'{d.isoformat()}:{_fmt_amount(a)}' for d, a in schedule) or 'none',
+        'earliest_date_for_full_payment': efpd.isoformat() if efpd else '',
+        'spending_changes_needed': _fmt_changes(changes),
+        'decision_explanation': generate_explanation(method, req, profile, schedule, changes, state),
     }
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
+def conservative_row(req, reason):
+    """Fail-closed answer when the evidence a request depends on cannot be used."""
+    return {
+        'request_id': req['request_id'],
+        'amount_safe_to_pay': '0',
+        'affordability_status': 'not_affordable',
+        'recommended_payment_method': 'not_recommended',
+        'payment_plan': 'none',
+        'earliest_date_for_full_payment': '',
+        'spending_changes_needed': 'none',
+        'decision_explanation': f'No payment is recommended because required evidence could not be verified ({reason}).',
+    }
+
+
+def run_requests(requests, dataset, converter, unresolved):
+    """Process requests in the order given. Returns (rows, {request_id: reason} answered conservatively)."""
+    rows, held = [], {}
+    for req in requests:
+        try:
+            rows.append(process_request(req, dataset, converter))
+        except EvidenceError as exc:
+            event_id = str(exc).split(':')[0]
+            reason = f'{exc}; {unresolved[event_id]}' if event_id in unresolved else str(exc)
+            held[req['request_id']] = reason
+            rows.append(conservative_row(req, reason))
+    return rows, held
+
+
+def _model_client():
+    if not (os.environ.get('ANTHROPIC_API_KEY') or os.environ.get('ANTHROPIC_AUTH_TOKEN')):
+        return None
+    import anthropic  # imported here so the cached, offline path needs no third-party package
+    return anthropic.Anthropic()
+
 
 def main():
-    print('Loading dataset...')
-    t0 = time.time()
-    ds = Dataset()
-    converter = CurrencyConverter(ds.rates_raw)
-    print(f'  Loaded in {time.time() - t0:.1f}s  '
-          f'({len(ds.requests)} requests, {sum(len(v) for v in ds.events_by_user.values())} events)')
+    started = time.time()
+    dataset = Dataset()
+    converter = CurrencyConverter(dataset.rates_raw)
+    unresolved, usage = resolve_blank_amounts(
+        dataset, client=_model_client(), refresh='--refresh-evidence' in sys.argv)
+
+    rows, held = run_requests(dataset.requests, dataset, converter, unresolved)
+
+    problems = output_problems(rows, dataset.requests, dataset)
+    if problems:
+        print(f'STOPPED: {len(problems)} output rule violations, output.csv was not written.')
+        print('\n'.join(problems))
+        return 1
 
     output_path = os.path.join(config.DATASET_DIR, 'output.csv')
-    rows = []
-    errors = []
-
-    for i, req in enumerate(ds.requests):
-        rid = req['request_id']
-        try:
-            row = process_request(req, ds, converter)
-            rows.append(row)
-            if (i + 1) % 25 == 0:
-                print(f'  Processed {i + 1}/{len(ds.requests)} requests...')
-        except Exception as exc:
-            import traceback
-            errors.append((rid, str(exc)))
-            print(f'  ERROR on {rid}: {exc}')
-            traceback.print_exc()
-            # Write a blank row so the CSV stays complete
-            rows.append({
-                'request_id': rid,
-                'amount_safe_to_pay': '',
-                'affordability_status': '',
-                'recommended_payment_method': '',
-                'payment_plan': 'none',
-                'earliest_date_for_full_payment': '',
-                'spending_changes_needed': 'none',
-                'decision_explanation': '',
-            })
-
-    # Write output.csv
     with open(output_path, 'w', newline='', encoding='utf-8') as f:
         writer = csv.DictWriter(f, fieldnames=config.OUTPUT_COLUMNS)
         writer.writeheader()
         writer.writerows(rows)
 
-    elapsed = time.time() - t0
-    print(f'\nDone. {len(rows)} rows written to {output_path}  ({elapsed:.1f}s)')
-    if errors:
-        print(f'  {len(errors)} errors: {[e[0] for e in errors]}')
+    _write_usage_report(len(rows), usage, time.time() - started)
+    print(f'{len(rows)} rows written to {output_path} in {time.time() - started:.1f}s')
+    print(f"Evidence: {usage['cached']} cached findings, {usage['calls']} model calls, "
+          f"{len(unresolved)} unresolved, {len(dataset.rejected_evidence)} messages rejected on identity.")
+    for request_id, reason in held.items():
+        print(f'  CONSERVATIVE {request_id}: {reason}')
+    return 2 if held else 0
 
-    # Write usage report
-    _write_usage_report(len(rows), elapsed)
-    return 0
 
-
-def _write_usage_report(num_requests, elapsed_seconds):
-    report_path = os.path.join(_SCRIPT_DIR, 'evaluation', 'usage_report.md')
-    os.makedirs(os.path.dirname(report_path), exist_ok=True)
-    avg = elapsed_seconds / max(num_requests, 1)
-    with open(report_path, 'w', encoding='utf-8') as f:
-        f.write('# Token Usage and Cost Report\n\n')
-        f.write('## Final Full-Dataset Run\n\n')
-        f.write(f'| Metric | Value |\n')
-        f.write(f'|--------|-------|\n')
-        f.write(f'| Total requests processed | {num_requests} |\n')
-        f.write(f'| Total wall-clock time | {elapsed_seconds:.1f}s |\n')
-        f.write(f'| Average time per request | {avg:.3f}s |\n\n')
-        f.write('---\n\n')
-        f.write('## AI Components\n\n')
-        f.write('### 1. Pytesseract OCR (local, open-source)\n\n')
-        f.write('Extracts monetary amounts from up to 16 blank-amount financial document images.\n\n')
-        f.write('| Metric | Value |\n')
-        f.write('|--------|-------|\n')
-        f.write('| Provider | Tesseract OCR (local) |\n')
-        f.write('| Images processed | up to 16 |\n')
-        f.write('| API calls | 0 (local) |\n')
-        f.write('| Estimated cost | $0.00 |\n\n')
-        f.write('### 2. Anthropic Claude Vision (optional)\n\n')
-        f.write('When `ANTHROPIC_API_KEY` is set, replaces Pytesseract for higher accuracy.\n\n')
-        f.write('| Metric | Value |\n')
-        f.write('|--------|-------|\n')
-        f.write('| Provider | Anthropic |\n')
-        f.write('| Model | claude-sonnet-4-5 |\n')
-        f.write('| Max API calls | 16 (one per blank-amount image) |\n')
-        f.write('| Est. input tokens per call | ~1,500 |\n')
-        f.write('| Est. output tokens per call | ~10 |\n')
-        f.write('| Est. total tokens (all 16) | ~24,160 |\n')
-        f.write('| Est. avg tokens per request | ~97 |\n')
-        f.write('| Est. total cost | ~$0.036 USD |\n')
-        f.write('| Est. cost per request | ~$0.00014 USD |\n\n')
-        f.write('**This run:** Anthropic vision was **not active** '
-                '(ANTHROPIC_API_KEY not set).\n\n')
-        f.write('---\n\n')
-        f.write('## Rule-Based AI Components\n\n')
-        f.write('| Component | Description |\n')
-        f.write('|-----------|-------------|\n')
-        f.write('| `lib/messages_nlp.py` | 20 regex pattern families, ')
-        f.write('96 messages parsed, 5 languages |\n')
-        f.write('| `lib/events.py` | Recurring pattern detection, ')
-        f.write('salary projection, message-driven state mutation |\n')
-        f.write('| `lib/forecast.py` | O(n) suffix-minimum forecaster, ')
-        f.write('90-day balance simulation |\n')
-        f.write('| `lib/planner.py` | 6-level plan ranking, ')
-        f.write('spending-change combinatorial search |\n\n')
-        f.write('---\n\n')
-        f.write('## Cost Summary\n\n')
-        f.write('| Component | Cost |\n')
-        f.write('|-----------|------|\n')
-        f.write('| Pytesseract OCR | $0.00 |\n')
-        f.write('| Anthropic Claude Vision (if enabled) | ~$0.036 |\n')
-        f.write('| Rule-based NLP + forecasting | $0.00 |\n')
-        f.write('| **Total (this run, no Anthropic)** | **$0.00** |\n')
-        f.write('| **Total (with Anthropic)** | **~$0.036** |\n')
+def _write_usage_report(num_requests, usage, seconds):
+    tokens = usage['input_tokens'] + usage['output_tokens']
+    cost = (usage['input_tokens'] * _PRICE_PER_MTOK[0] + usage['output_tokens'] * _PRICE_PER_MTOK[1]) / 1e6
+    lines = [
+        '# Token Usage and Cost Report',
+        '',
+        'Written by `code/main.py` for the run that produced `dataset/output.csv`.',
+        '',
+        '| Metric | Value |',
+        '|--------|-------|',
+        f'| Requests processed | {num_requests} |',
+        '| Model provider | Anthropic |',
+        f'| Model | {MODEL} |',
+        f'| Model calls in this run | {usage["calls"]} |',
+        f'| Input tokens | {usage["input_tokens"]} |',
+        f'| Output tokens | {usage["output_tokens"]} |',
+        f'| Total tokens | {tokens} |',
+        f'| Average tokens per request | {tokens / num_requests:.1f} |',
+        f'| Estimated total cost (USD) | {cost:.4f} |',
+        f'| Estimated cost per request (USD) | {cost / num_requests:.6f} |',
+        f'| Document findings served from cache | {usage["cached"]} |',
+        f'| Wall-clock time | {seconds:.1f}s |',
+        '',
+        'The model is used only to read the document images behind blank ledger amounts',
+        '(`lib/investigator.py`). Findings are cached in `code/evidence_cache.json`, keyed by',
+        'image hash, so a rerun on unchanged images makes no model calls. Each cache entry',
+        'records its `source`; entries whose source starts with `seeded` were read in a',
+        'development session and cost no API tokens. Run `python code/main.py',
+        '--refresh-evidence` with `ANTHROPIC_API_KEY` set to regenerate them through the API',
+        'and get measured token counts here. Cost uses '
+        f'${_PRICE_PER_MTOK[0]:.2f} / ${_PRICE_PER_MTOK[1]:.2f} per million input / output tokens.',
+        '',
+    ]
+    with open(os.path.join(config.CODE_DIR, 'evaluation', 'usage_report.md'), 'w', encoding='utf-8') as f:
+        f.write('\n'.join(lines))
 
 
 if __name__ == '__main__':

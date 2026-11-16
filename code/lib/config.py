@@ -2,20 +2,18 @@
 import os
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+CODE_DIR = os.path.join(REPO_ROOT, "code")
 DATASET_DIR = os.path.join(REPO_ROOT, "dataset")
 MEDIA_IMAGES_DIR = os.path.join(DATASET_DIR, "media", "images")
 
 FORECAST_DAYS = 90
 
-# financial_events.csv status handling
-SETTLED_STATUSES = {"settled"}
+# Not yet settled but will move cash. failed, cancelled and unrealized rows never do.
 CONFIRMED_FUTURE_STATUSES = {"pending", "scheduled"}
-EXCLUDED_STATUSES = {"cancelled", "failed", "unrealized"}
 
 # direction values
 DEBIT = "debit"
 CREDIT = "credit"
-NON_CASH = "non_cash"
 
 # flexibility values that allow spending changes
 FLEXIBLE_STOPPABLE = {"stoppable", "reducible_or_stoppable"}
@@ -29,21 +27,6 @@ NON_RECURRING_EVENT_TYPES = {
     "investment_purchase",
     "investment_sale",
     "investment_valuation",
-}
-
-# Allowed output enums
-AFFORDABILITY_STATUSES = {
-    "affordable_now",
-    "affordable_with_plan",
-    "affordable_later",
-    "not_affordable",
-}
-PAYMENT_METHODS = {
-    "full_payment",
-    "partial_payment",
-    "installments",
-    "wait",
-    "not_recommended",
 }
 
 OUTPUT_COLUMNS = [

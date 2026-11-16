@@ -2,6 +2,8 @@
 from collections import defaultdict, deque
 from datetime import date
 
+from .evidence import EvidenceError
+
 
 class CurrencyConverter:
     def __init__(self, rates_raw):
@@ -40,7 +42,7 @@ class CurrencyConverter:
         graph = self._graph(date_key)
         rate = self._bfs_rate(graph, from_currency, to_currency)
         if rate is None:
-            raise ValueError(f"No FX path from {from_currency} to {to_currency} near {on_date_str}")
+            raise EvidenceError(f"No FX path from {from_currency} to {to_currency} near {on_date_str}")
         return amount * rate
 
     @staticmethod

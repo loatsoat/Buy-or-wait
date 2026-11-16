@@ -12,14 +12,9 @@ def _read_csv(path):
 
 
 def parse_date(s):
-    if not s:
-        return None
-    s = s.strip()
-    if not s:
-        return None
-    if "T" in s:
-        s = s.split("T")[0]
-    return datetime.strptime(s, "%Y-%m-%d").date()
+    """'YYYY-MM-DD' or an ISO timestamp -> date; blank -> None; malformed -> ValueError."""
+    s = (s or "").strip().split("T")[0]
+    return datetime.strptime(s, "%Y-%m-%d").date() if s else None
 
 
 def parse_pipe_list(s):
@@ -42,48 +37,44 @@ def parse_float(s):
 
 class Dataset:
     def __init__(self, dataset_dir=config.DATASET_DIR):
-        self.dataset_dir = dataset_dir
-        self.profiles_raw = _read_csv(os.path.join(dataset_dir, "financial_profiles.csv"))
-        self.events_raw = _read_csv(os.path.join(dataset_dir, "financial_events.csv"))
-        self.rates_raw = _read_csv(os.path.join(dataset_dir, "exchange_rates.csv"))
-        self.requests_raw = _read_csv(os.path.join(dataset_dir, "requests.csv"))
-        self.payment_options_raw = _read_csv(os.path.join(dataset_dir, "request_payment_options.csv"))
-        self.messages_raw = _read_csv(os.path.join(dataset_dir, "messages.csv"))
-        self.images_raw = _read_csv(os.path.join(dataset_dir, "images.csv"))
+        def load(name):
+            return _read_csv(os.path.join(dataset_dir, name))
 
-        self.profiles = {p["user_id"]: self._norm_profile(p) for p in self.profiles_raw}
+        self.rates_raw = load("exchange_rates.csv")
+        self.profiles = {p["user_id"]: self._norm_profile(p) for p in load("financial_profiles.csv")}
 
         self.events_by_user = {}
-        for e in self.events_raw:
+        event_user = {}
+        for e in load("financial_events.csv"):
             self.events_by_user.setdefault(e["user_id"], []).append(self._norm_event(e))
+            event_user[e["event_id"]] = e["user_id"]
 
         self.payment_options_by_request = {}
-        for po in self.payment_options_raw:
+        for po in load("request_payment_options.csv"):
             self.payment_options_by_request.setdefault(po["request_id"], []).append(
                 self._norm_payment_option(po)
             )
 
+        # Row order of requests.csv is the output order; nothing downstream may re-sort it.
+        self.requests = [self._norm_request(r) for r in load("requests.csv")]
+        self.sample_requests = [self._norm_request(r) for r in load("sample_requests.csv")]
+        self.request_user = {r["request_id"]: r["user_id"] for r in self.requests + self.sample_requests}
+
+        # Evidence that names another user's event or request is discarded, never re-attributed.
+        self.rejected_evidence = []
         self.messages_by_user = {}
-        self.messages_by_request = {}
-        self.messages_by_event = {}
-        for m in self.messages_raw:
-            m2 = dict(m)
-            m2["sent_at_date"] = parse_date(m["sent_at"]) if m.get("sent_at") else None
-            self.messages_by_user.setdefault(m["user_id"], []).append(m2)
-            if m.get("request_id"):
-                self.messages_by_request.setdefault(m["request_id"], []).append(m2)
-            if m.get("related_event_id"):
-                self.messages_by_event.setdefault(m["related_event_id"], []).append(m2)
+        for m in load("messages.csv"):
+            if (event_user.get(m["related_event_id"], m["user_id"]) != m["user_id"]
+                    or self.request_user.get(m["request_id"], m["user_id"]) != m["user_id"]):
+                self.rejected_evidence.append(m["message_id"])
+                continue
+            try:
+                m["sent_at_date"] = parse_date(m["sent_at"])
+            except ValueError:
+                m["sent_at_date"] = None  # unknown send time: events.py will not use the message
+            self.messages_by_user.setdefault(m["user_id"], []).append(m)
 
-        self.images_by_event = {}
-        self.images_by_request = {}
-        for im in self.images_raw:
-            if im.get("related_event_id"):
-                self.images_by_event[im["related_event_id"]] = im
-            if im.get("request_id"):
-                self.images_by_request.setdefault(im["request_id"], []).append(im)
-
-        self.requests = [self._norm_request(r) for r in self.requests_raw]
+        self.images_by_event = {im["related_event_id"]: im for im in load("images.csv")}
 
     @staticmethod
     def _norm_profile(p):
