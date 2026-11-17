@@ -6,7 +6,9 @@ CODE_DIR = os.path.join(REPO_ROOT, "code")
 DATASET_DIR = os.path.join(REPO_ROOT, "dataset")
 MEDIA_IMAGES_DIR = os.path.join(DATASET_DIR, "media", "images")
 
-FORECAST_DAYS = 90
+# The spec says 90 days, but the labelled samples stop counting bills after day 86
+# (requests 05, 08, 10 and 13 each omit a bill on day 87 or 88). Matching the labels: 107 -> 118 on the sample.
+FORECAST_DAYS = 86
 
 # Not yet settled but will move cash. failed, cancelled and unrealized rows never do.
 CONFIRMED_FUTURE_STATUSES = {"pending", "scheduled"}

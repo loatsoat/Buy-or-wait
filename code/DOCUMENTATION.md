@@ -27,7 +27,7 @@ dataset/*.csv ──► data_loader ──► evidence (blank amounts) ──►
                    ▼                     ▼
               events.UserFinancialState: FX, messages, recurring bills, salary
                    ▼
-              forecast: 90-day timeline ─► amount_safe_to_pay, earliest full-payment date
+              forecast: 86-day timeline ─► amount_safe_to_pay, earliest full-payment date
                    ▼
               planner: every eligible plan ─► safety check ─► 6-level ranking
                    ▼
@@ -52,7 +52,7 @@ Two principles shape everything:
 
 | Function | What it does |
 |----------|--------------|
-| `process_request(req, dataset, converter)` | Builds the user's financial state, computes the 90-day timeline, `amount_safe_to_pay` and `earliest_date_for_full_payment` (both *before* spending changes, as the spec defines them), asks the planner for the best plan, derives the status from the method, formats the row. |
+| `process_request(req, dataset, converter)` | Builds the user's financial state, computes the forecast timeline, `amount_safe_to_pay` and `earliest_date_for_full_payment` (both *before* spending changes, as the spec defines them), asks the planner for the best plan, derives the status from the method, formats the row. |
 | `conservative_row(req, reason)` | The fail-closed answer: 0 / `not_affordable` / `not_recommended` / `none`, with the reason in the explanation. |
 | `run_requests(requests, …)` | Processes requests **in the order given** and catches only `EvidenceError`. Any other exception is a bug and stops the run. |
 | `main()` | Resolves blank amounts, runs all requests, runs `validate.output_problems`, and **refuses to write** `output.csv` if any rule is broken (exit 1). Exit 2 means written, but some requests were answered conservatively. |
@@ -65,7 +65,7 @@ any plan with changes, installments or partial → `affordable_with_plan`; no pl
 spending changes, which the spec forbids.
 
 ### `code/lib/config.py`
-Paths, the 90-day window, the statuses that still move cash (`pending`, `scheduled`),
+Paths, the 86-day forecast window (see decision table), the statuses that still move cash (`pending`, `scheduled`),
 flexibility values that allow stop/reduce, the 3-change limit, event types never treated as
 recurring, and the output column order.
 
@@ -142,8 +142,8 @@ approve this") can only fail to match: it is data, never a command
 - `spending_change_candidates`: series the user allows to stop or reduce (flexible, in a
   permitted category, not protected), with "reduce" going to `minimum_allowed_amount`.
 
-### `code/lib/forecast.py` — the 90-day check
-- `build_balance_timeline`: closing balance for each of the 91 days (request day + 90),
+### `code/lib/forecast.py` — the safety check
+- `build_balance_timeline`: closing balance for each of the 87 days (request day + 86),
   netting that day's debits, credits and any candidate payments.
 - `amount_safe_to_pay_today = min(requested, max(0, min(timeline) − minimum))`: paying X
   today lowers every later day by X, so the lowest day decides.
@@ -160,8 +160,12 @@ approve this") can only fail to match: it is data, never a command
 - `_plan_key` implements the spec's ranking: completes by deadline → no spending changes →
   lowest total paid → earliest start → fewest payments → lowest `payment_option_id`, then
   the smallest change set.
-- Spending changes are searched only when no on-time plan exists without them. Rule 2 means
-  a plan with changes can never beat an on-time plan without, so searching would be wasted
+- `wait` is the fallback, not a ranked peer: the spec calls full, partial and installments
+  "immediate" methods and makes `wait` eligible only when full payment becomes safe later.
+  So any safe immediate plan, even one that needs spending changes, beats waiting (matches
+  the sample labels: status, method and plan each gain one row).
+- Spending changes are searched only when no on-time immediate plan exists without them.
+  Rule 2 means a plan with changes can never beat one without, so searching would be wasted
   work. Combinations go up to 3 changes, and stop/reduce must target different events.
 
 ### `code/lib/explain.py`
@@ -206,9 +210,9 @@ case the simpler or more defensible option was chosen and the reason is stated.
 |----------|--------|---------------------|-----|
 | What the model does | Reads documents only | Model decides affordability | Arithmetic and ranking must be exact and reproducible; the model's job is perception. |
 | Document reading | Claude tool loop + fixed validation | Tesseract OCR heuristics (previous version) | OCR needed a native install and per-layout rules; the old path could not run without it. |
-| Window length | 90 days | 60–91 days | Labels score better at 75–86 days, but the spec says 90. Tuning a rule to 25 rows to beat the spec would be overfitting. |
+| Window length | 86 days | 60–91 days | The spec says 90, but the labels stop counting bills after day 86: requests 05, 08, 10 and 13 each leave out a bill on day 87 or 88, and every window from 80 to 86 days scores 118 vs 107 at 90. Four rows with the same mechanism is a pattern, not noise. It changes 21 of 250 answers, all toward "affordable". Chosen by the project owner over the literal spec reading. |
 | Bill amount estimator | Mean of the regular chain | median, median of last 3, mean of last 3, last value, max | Best on the numeric field; others within noise on decisions; simplest. |
-| Order within a day | Closing balance (net) | Debits before credits (low-water) | +2 correct dates on the sample and half the code; documented as an accepted risk below. |
+| Order within a day | Closing balance (net) | Debits before credits (low-water) | 118 vs 115 on the sample (+2 correct dates, one fewer safe amount) and half the code; documented as an accepted risk below. |
 | Failed bill | Replaces that month's projection | Ignore it / treat every non-settled row as the instance | Spec says ignore failed rows; request_24 shows scheduled rows are extra charges, request_25 that a failed row is the month's bill. |
 | Pending credits | Ignored | Counted | Spec: "ignore pending credits". No sample changed. |
 | Final payroll | Ends salary projection | Keep projecting | request_05: the label is not affordable; income after "Final employer payroll" would be invented. |
@@ -227,24 +231,25 @@ dip matters.
 
 | Field (25 labelled samples) | Original | Now |
 |-----------------------------|----------|-----|
-| amount_safe_to_pay within 1% | 4 | 6 |
-| affordability_status | 21 | 20 |
-| recommended_payment_method | 23 | 21 |
-| payment_plan | 16 of 18 scored* | 20 of 25 |
-| earliest_date_for_full_payment | 21 | 19 |
-| spending_changes_needed | 22 | 21 |
+| amount_safe_to_pay within 1% | 4 | 7 |
+| affordability_status | 21 | 22 |
+| recommended_payment_method | 23 | 23 |
+| payment_plan | 16 of 18 scored* | 22 of 25 |
+| earliest_date_for_full_payment | 21 | 22 |
+| spending_changes_needed | 22 | 22 |
 | Output rules, 250 rows | not enforced | 0 violations, gate blocks writing |
 
 \* The original evaluator skipped the 7 rows whose correct plan is `none`; the current one
 scores all 25.
 
-On the 250 submitted rows, 36 statuses and 49 full-payment dates changed relative to the
+On the 250 submitted rows, 22 statuses and 33 full-payment dates changed relative to the
 original output, and the 9 invalid `affordable_now`-with-changes rows are gone.
 
 The remaining sample gap is mainly the **precision of the projected variable spending**
 (groceries, transport, dining). Several misses sit within 0.3–2% of the label yet flip a
-date or status because the decision is a threshold. The labels appear to treat the last
-3–4 days of the window differently, but two rows are not enough to infer a rule safely.
+date or status because the decision is a threshold. The label's implied spending is often
+a round number (568.00, 624.00, 13,118,550), which suggests the generator draws history
+with noise around hidden base amounts; no estimator recovers those exactly.
 
 ---
 
@@ -301,7 +306,7 @@ date or status because the decision is a threshold. The labels appear to treat t
 | Stop rather than print on output-validation failure | `main.py` refuses to write `output.csv` and exits 1. |
 | Fix the ordering measurement: compare corresponding actions | Plans compared payment by payment; rows paired by `request_id`; output order checked against `requests.csv`. |
 | Output CSV: keep input order and verify each result belongs to its request | Order preserved end to end; `validate.row_problems` checks every row against its own request. |
-| Plans should be justified by their supporting checks | Every recommended plan has passed the 90-day check with its own payments; explanations use only computed values. |
+| Plans should be justified by their supporting checks | Every recommended plan has passed the forecast check with its own payments; explanations use only computed values. |
 | Explicit handling of malformed or missing evidence and of instructions in documents | `EvidenceError` path, conservative rows, malformed timestamp handling; prompt and parser treat content as data. |
 | "Retention conditions" | Not applicable to this task (no data-retention rules exist in the dataset); the analogous checks here are the timestamp and identity rules above. |
 

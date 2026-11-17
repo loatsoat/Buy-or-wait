@@ -15,7 +15,7 @@ Written by `code/main.py` for the run that produced `dataset/output.csv`.
 | Estimated total cost (USD) | 0.0000 |
 | Estimated cost per request (USD) | 0.000000 |
 | Document findings served from cache | 16 |
-| Wall-clock time | 0.6s |
+| Wall-clock time | 0.7s |
 
 The model is used only to read the document images behind blank ledger amounts
 (`lib/investigator.py`). Findings are cached in `code/evidence_cache.json`, keyed by

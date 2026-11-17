@@ -6,6 +6,7 @@ Ranking from the problem statement (lower tuple wins):
   3. lower total paid                       6. lower payment_option_id
 Ties between change sets go to the smaller set.
 """
+import calendar
 from datetime import timedelta
 from itertools import combinations
 
@@ -28,8 +29,14 @@ def _plan_key(plan):
 
 
 def _within_installment_limit(schedule, request_date, max_months):
-    # shortcut: a month is counted as 31 days; switch to calendar months if an option ever sits on the boundary.
-    return max_months is not None and (schedule[-1][0] - request_date).days <= max_months * 31
+    """Last payment falls on or before request_date + max_months calendar months (day clamped to month end)."""
+    if max_months is None:
+        return False
+    month_index = request_date.month - 1 + max_months
+    year, month = request_date.year + month_index // 12, month_index % 12 + 1
+    limit = request_date.replace(year=year, month=month,
+                                 day=min(request_date.day, calendar.monthrange(year, month)[1]))
+    return schedule[-1][0] <= limit
 
 
 def _schedules(request, profile, options, astp, efpd, with_changes):
@@ -81,8 +88,8 @@ def _safe_plans(request, state, options, astp, efpd, changes, stop=(), reduce=No
 def select_plan(request, state, options, astp, efpd):
     """Return the best safe plan dict, or None when nothing eligible is safe."""
     plans = list(_safe_plans(request, state, options, astp, efpd, []))
-    # Spending changes rank below every on-time plan without them, so only search when none exists.
-    if not any(p['completes_by_deadline'] for p in plans):
+    # Spending changes rank below every on-time immediate plan without them, so only search when none exists.
+    if not any(p['completes_by_deadline'] and p['method'] != 'wait' for p in plans):
         candidates = state.spending_change_candidates()
         for size in range(1, min(config.MAX_SPENDING_CHANGES, len(candidates)) + 1):
             for combo in combinations(candidates, size):
@@ -92,4 +99,6 @@ def select_plan(request, state, options, astp, efpd):
                     request, state, options, astp, efpd, list(combo),
                     stop={c['series'] for c in combo if c['action'] == 'stop'},
                     reduce={c['series']: c['new_amount'] for c in combo if c['action'] == 'reduce_to'})
-    return min(plans, key=_plan_key) if plans else None
+    # Waiting is the fallback: it is chosen only when no immediate plan (even with changes) is safe.
+    immediate = [p for p in plans if p['method'] != 'wait']
+    return min(immediate or plans, key=_plan_key) if plans else None

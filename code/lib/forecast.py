@@ -1,4 +1,4 @@
-"""90-day balance forecast and the two safe-payment figures derived from it.
+"""Balance forecast over config.FORECAST_DAYS and the two safe-payment figures derived from it.
 
 The timeline holds each day's closing balance after that day's debits, credits and any
 payment of the plan being tested. The ledger gives dates, not times, so a bill and a

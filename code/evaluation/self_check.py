@@ -27,6 +27,16 @@ def check_forecast():
     assert forecast.earliest_full_payment_date(timeline, d0, 500.0, 5000.0) is None
 
 
+def check_installment_limit():
+    from lib.planner import _within_installment_limit as within
+    # Calendar months, day clamped to month end (31 Jan + 2 months = 31 Mar; 30 Nov + 3 = 29 Feb).
+    assert within([(date(2026, 3, 31), 1)], date(2026, 1, 31), 2)
+    assert not within([(date(2026, 4, 1), 1)], date(2026, 1, 31), 2)
+    assert within([(date(2024, 2, 29), 1)], date(2023, 11, 30), 3)
+    assert not within([(date(2024, 3, 1), 1)], date(2023, 11, 30), 3)
+    assert not within([(date(2026, 1, 1), 1)], date(2026, 1, 1), None)
+
+
 def check_output_rules(dataset, converter, unresolved):
     requests = dataset.requests
     rows, _ = run_requests(requests, dataset, converter, unresolved)
@@ -121,6 +131,7 @@ def main():
     converter = CurrencyConverter(dataset.rates_raw)
     unresolved, _ = resolve_blank_amounts(dataset)
     check_forecast()
+    check_installment_limit()
     check_output_rules(dataset, converter, unresolved)
     check_evidence(dataset)
     check_investigator_loop(dataset)

@@ -58,7 +58,7 @@ code/
     ├── investigator.py     bounded Claude tool-use loop that reads one document
     ├── messages_nlp.py     deterministic message parser (20 amendment families)
     ├── events.py           per-user financial state: recurring bills, salary, messages
-    ├── forecast.py         90-day balance timeline and the two safe-payment figures
+    ├── forecast.py         balance timeline and the two safe-payment figures
     ├── planner.py          plan enumeration, safety check, ranking, spending changes
     ├── explain.py          explanation templates
     └── validate.py         output rules checked before output.csv is written
@@ -68,10 +68,10 @@ code/
 
 | Field | Correct |
 |-------|---------|
-| amount_safe_to_pay (within 1%) | 6/25 |
-| affordability_status | 20/25 |
-| recommended_payment_method | 21/25 |
-| payment_plan | 20/25 |
-| earliest_date_for_full_payment | 19/25 |
-| spending_changes_needed | 21/25 |
+| amount_safe_to_pay (within 1%) | 7/25 |
+| affordability_status | 22/25 |
+| recommended_payment_method | 23/25 |
+| payment_plan | 22/25 |
+| earliest_date_for_full_payment | 22/25 |
+| spending_changes_needed | 22/25 |
 | Output rules on all 250 rows | 0 violations |
