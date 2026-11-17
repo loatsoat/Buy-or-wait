@@ -16,7 +16,7 @@ balance the user wants to keep, and facts hidden in messages ("your salary rises
 250 requests the system must output seven fields: the amount safe to pay today, an
 affordability status, a payment method, a dated payment plan, the earliest safe date for one
 full payment, any spending changes, and a short explanation. A plan is safe only if the
-projected balance never drops below the user's minimum during the next 90 days.
+projected balance never drops below the user's minimum during the next 86 days (see §4 for why not the 90 the spec states).
 
 ## 2. Architecture
 

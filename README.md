@@ -5,6 +5,12 @@ pay today, whether the full amount is affordable now, with a plan, later or not 
 which payment method and schedule to use, the earliest safe date for a full payment, which
 flexible expenses must change, and a one-line explanation.
 
+**Why it matters:** "can I afford this?" depends on more than today's balance. Rent and bills
+that will leave the account, salary that will arrive, pending charges, the minimum balance the
+user wants to keep, and facts hidden in messages ("your salary rises from the 15th") or
+document images all change the answer. A plan is recommended only if the projected balance
+never drops below the user's minimum over the forecast window.
+
 A full walkthrough of every file, every design choice and the background knowledge behind
 it is in [code/DOCUMENTATION.md](code/DOCUMENTATION.md). The model prompt and tool
 definitions are in [code/prompts.md](code/prompts.md).

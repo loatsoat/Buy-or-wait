@@ -33,5 +33,12 @@ debug_*.py
 # Tesseract (optional local install)
 tessdata/
 
-# Log — keep log.txt tracked per AGENTS.md requirement
-# (do NOT add log.txt here)
+# Agent session log (AGENTS.md §2: never commit)
+log.txt
+
+# Local reference docs
+*.pdf
+
+# AI agent instructions (kept locally, not published)
+AGENTS.md
+CLAUDE.md
